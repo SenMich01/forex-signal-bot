@@ -68,7 +68,7 @@ class ForexSignalBot:
                 logger.error(f"Error processing webhook: {e}")
                 return jsonify({'status': 'error', 'message': str(e)}), 500
         
-        @self.app.route('/health', methods=['GET'])
+        @self.app.route('/', methods=['GET'])
         def health():
             """Health check endpoint."""
             return "Bot is running", 200
@@ -309,10 +309,10 @@ Risk Management:
     
     def run_flask(self):
         """Run the Flask application."""
-        port = int(os.getenv('PORT', 8080))
+        port = int(os.environ.get("PORT", 8080))
         
         logger.info(f"Starting Flask server on port {port}")
-        self.app.run(host='0.0.0.0', port=port, debug=False)
+        self.app.run(host="0.0.0.0", port=port)
 
 def main():
     """Main entry point."""
