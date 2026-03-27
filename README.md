@@ -129,16 +129,18 @@ The bot sends formatted signals like this:
 
 ## Deployment
 
-### Render.com (Recommended)
+### Render.com (Recommended - Free Tier)
 
 1. **Create Render account** and connect your GitHub repository
-2. **Create Background Worker** (NOT Web Service) and select this repository
+2. **Create Web Service** (NOT Background Worker) and select this repository
 3. **Configure settings**:
    - Runtime: Python 3.11
    - Build Command: `pip install -r requirements.txt`
    - Start Command: `python bot.py`
 4. **Add environment variables**:
-   - `TELEGRAM_BOT_TOKEN`: Your bot token
+   - `TELEGRAM_BOT_TOKEN`: Your bot token from @BotFather
+   - `APPLICATION_URL`: Your Render app URL (e.g., `https://your-app-name.onrender.com`)
+   - `PORT`: `8080` (default)
 5. **Deploy**
 
 ### GitHub Setup
@@ -172,6 +174,8 @@ The bot sends formatted signals like this:
 3. **Set environment variables**:
    ```bash
    heroku config:set TELEGRAM_BOT_TOKEN=your_token
+   heroku config:set APPLICATION_URL=https://your-app-name.herokuapp.com
+   heroku config:set PORT=8080
    ```
 4. **Deploy**:
    ```bash

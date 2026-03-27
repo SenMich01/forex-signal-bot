@@ -1,14 +1,17 @@
 """
-Main Telegram Forex Signal Bot.
+Main Telegram Forex Signal Bot (Webhook Mode).
 
 Handles Telegram bot interactions, command processing, and scheduled scanning.
+Runs as a Flask web server for webhook mode deployment.
 """
 
 import logging
 import os
 import asyncio
+import requests
 from datetime import datetime
 from typing import Dict, Any
+from flask import Flask, request, jsonify
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -45,6 +48,30 @@ class ForexSignalBot:
         self.application = None
         self.scheduler = None
         self.scanner = get_scanner()
+        self.app = Flask(__name__)
+        
+        # Set up Flask routes
+        self.setup_routes()
+    
+    def setup_routes(self):
+        """Set up Flask routes."""
+        
+        @self.app.route('/webhook', methods=['POST'])
+        def webhook():
+            """Handle incoming webhook requests from Telegram."""
+            try:
+                json_str = request.get_data().decode('UTF-8')
+                update = Update.de_json(json.loads(json_str), self.application.bot)
+                asyncio.run(self.application.process_update(update))
+                return jsonify({'status': 'ok'}), 200
+            except Exception as e:
+                logger.error(f"Error processing webhook: {e}")
+                return jsonify({'status': 'error', 'message': str(e)}), 500
+        
+        @self.app.route('/health', methods=['GET'])
+        def health():
+            """Health check endpoint."""
+            return "Bot is running", 200
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command."""
@@ -204,8 +231,39 @@ Risk Management:
         
         logger.info(f"Scheduled scans every {SCAN_INTERVAL_MINUTES} minutes")
     
+    async def register_webhook(self):
+        """Register webhook with Telegram."""
+        webhook_url = os.getenv('APPLICATION_URL', '')
+        if not webhook_url:
+            logger.error("APPLICATION_URL environment variable not set")
+            return False
+        
+        webhook_endpoint = f"{webhook_url}/webhook"
+        
+        try:
+            response = requests.get(
+                f"https://api.telegram.org/bot{self.token}/setWebhook",
+                params={'url': webhook_endpoint}
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('ok'):
+                    logger.info(f"Webhook registered successfully: {webhook_endpoint}")
+                    return True
+                else:
+                    logger.error(f"Failed to register webhook: {result}")
+                    return False
+            else:
+                logger.error(f"Failed to register webhook: HTTP {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error registering webhook: {e}")
+            return False
+    
     async def start_bot(self):
-        """Start the Telegram bot."""
+        """Start the Telegram bot in webhook mode."""
         self.application = Application.builder().token(self.token).build()
         
         # Add command handlers
@@ -222,25 +280,21 @@ Risk Management:
         # Set up scheduler
         await self.setup_scheduler()
         
-        # Start the bot
-        logger.info("Starting Forex Signal Bot...")
+        # Register webhook
+        webhook_success = await self.register_webhook()
+        if not webhook_success:
+            logger.warning("Failed to register webhook. Bot may not receive updates.")
+        
+        # Start the application
         await self.application.initialize()
         await self.application.start()
-        await self.application.updater.start_polling()
         
         # Start scheduler
         self.scheduler.start()
         
-        logger.info("Bot is running and ready to receive commands!")
+        logger.info("Bot started in webhook mode")
         
-        # Keep the bot running
-        try:
-            while True:
-                await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("Bot stopped by user")
-        finally:
-            await self.stop_bot()
+        return True
     
     async def stop_bot(self):
         """Stop the bot gracefully."""
@@ -252,6 +306,13 @@ Risk Management:
             await self.application.shutdown()
         
         logger.info("Bot stopped")
+    
+    def run_flask(self):
+        """Run the Flask application."""
+        port = int(os.getenv('PORT', 8080))
+        
+        logger.info(f"Starting Flask server on port {port}")
+        self.app.run(host='0.0.0.0', port=port, debug=False)
 
 def main():
     """Main entry point."""
@@ -270,9 +331,15 @@ def main():
     bot = ForexSignalBot(token)
     
     try:
+        # Start bot in async context
         asyncio.run(bot.start_bot())
+        
+        # Run Flask server
+        bot.run_flask()
+        
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
+        asyncio.run(bot.stop_bot())
 
 if __name__ == "__main__":
     main()
