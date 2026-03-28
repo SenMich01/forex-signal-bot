@@ -81,7 +81,7 @@ async def pairs_command(update, context):
 
 async def signal_command(update, context):
     try:
-        from strategy import generate_signal_for_pair, is_market_open
+        from strategy import get_signal, is_market_open
 
         if not context.args:
             await update.message.reply_text(
@@ -110,7 +110,7 @@ async def signal_command(update, context):
 
         await update.message.reply_text(f"🔍 Analyzing {pair}...")
 
-        signal = generate_signal_for_pair(pair)
+        signal = get_signal(pair)
 
         if signal.get("error"):
             await update.message.reply_text(
@@ -154,7 +154,7 @@ async def signal_command(update, context):
 
 async def signalall_command(update, context):
     try:
-        from strategy import generate_signal_for_pair, is_market_open
+        from strategy import get_signal, is_market_open
 
         if not is_market_open():
             await update.message.reply_text(
@@ -170,7 +170,7 @@ async def signalall_command(update, context):
 
         lines = ["📊 FULL MARKET SCAN\n"]
         for pair in pairs:
-            signal = generate_signal_for_pair(pair)
+            signal = get_signal(pair)
             if signal.get("error"):
                 lines.append(f"{pair}  ⚠️ No data")
             else:
