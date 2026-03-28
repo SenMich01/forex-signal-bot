@@ -11,6 +11,7 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
+from aiohttp import web
 
 load_dotenv()
 
@@ -203,16 +204,21 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❓ Unknown command.\nUse /help to see available commands."
     )
 
+# ── Health Check Route ─────────────────────────────────
+
+async def health(request):
+    return web.Response(text="Bot is running")
+
 # ── Main ──────────────────────────────────────────────
 
-def main():
+async def main():
     app = (
         Application.builder()
         .token(TOKEN)
         .build()
     )
 
-    # Register handlers
+    # Register all handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("pairs", pairs_command))
@@ -222,14 +228,20 @@ def main():
     app.add_handler(CommandHandler("debug", debug_command))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    # Run with built-in webhook server (no Flask needed)
+    # Add health check route to PTB's webserver
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         webhook_url=f"{APP_URL}/webhook",
         url_path="webhook",
-        allowed_updates=Update.ALL_TYPES
+        allowed_updates=Update.ALL_TYPES,
+        webserver_kwargs={
+            "routes": [
+                web.get("/", health),
+                web.get("/health", health),
+            ]
+        }
     )
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
