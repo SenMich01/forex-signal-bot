@@ -186,12 +186,14 @@ Use /signal EURUSD to check a specific pair."""
         await update.message.reply_text(f"🔍 Analyzing {pair_symbol}...")
         
         try:
-            signals = generate_signals_for_pair(pair_symbol)
+            # Import the new signal generation function
+            from strategy import generate_signal_for_pair
             
-            if signals:
-                for signal in signals:
-                    message = self.format_signal_message(signal)
-                    await update.message.reply_text(message)
+            signal_data = generate_signal_for_pair(pair_symbol)
+            
+            if signal_data:
+                message = self.format_signal_message_new(signal_data)
+                await update.message.reply_text(message)
             else:
                 pair_name = self.get_pair_name(pair_symbol)
                 await update.message.reply_text(f"🔍 No signal found for {pair_name} right now.\nMarket conditions don't meet entry criteria.\nTry again in a few minutes.")
@@ -205,11 +207,29 @@ Use /signal EURUSD to check a specific pair."""
         await update.message.reply_text("🔍 Scanning all pairs for signals...")
         
         try:
-            signals = await self.scanner.scan_and_generate_signals()
+            # Import the new signal generation function
+            from strategy import generate_signals_for_all_pairs
             
-            if signals:
-                for signal in signals:
-                    message = self.format_signal_message(signal)
+            signals_data = generate_signals_for_all_pairs()
+            
+            if signals_data:
+                # Show summary table first
+                summary_message = "📊 FULL MARKET SCAN\n"
+                for signal_data in signals_data:
+                    pair = signal_data["pair"]
+                    direction_emoji = "📈" if signal_data["direction"] == "BUY" else "📉"
+                    strength_emoji = "✅" if signal_data["strength"] == "STRONG" else "⚠️" if signal_data["strength"] == "MODERATE" else "❌"
+                    summary_message += f"{pair:<8} {direction_emoji} {signal_data['direction']:<6} {signal_data['strength']:<8} {strength_emoji}\n"
+                
+                summary_message += "\n✅ STRONG — High confidence trade\n⚠️ MODERATE — Decent setup, manage risk\n❌ WEAK — Avoid or use small size\n"
+                summary_message += "Use /signal USDJPY for full details.\n"
+                summary_message += f"⏱️ Scanned: {datetime.now().strftime('%H:%M UTC')}"
+                
+                await update.message.reply_text(summary_message)
+                
+                # Show full details for each signal
+                for signal_data in signals_data:
+                    message = self.format_signal_message_new(signal_data)
                     await update.message.reply_text(message)
             else:
                 await update.message.reply_text("🔍 No signals found across all pairs right now.\nNext auto-scan in a few minutes.")
@@ -249,6 +269,40 @@ Use /signal EURUSD to check a specific pair."""
 📊 RSI: {signal.rsi:.1f}
 ⏰ Timeframe: M5 | Session: London/New York
 ⏱️ Signal Time: {signal.timestamp.strftime('%Y-%m-%d %H:%M UTC')}"""
+        
+        return message
+    
+    def format_signal_message_new(self, signal_data: Dict) -> str:
+        """Format a new signal into a Telegram message."""
+        pair_name = signal_data["pair"]
+        direction_emoji = "🟢" if signal_data["direction"] == "BUY" else "🔴"
+        
+        message = f"""📊 FOREX SIGNAL — {pair_name}
+📈 Direction: {signal_data["direction"]} {direction_emoji}
+💪 Signal Strength: {signal_data["strength"]} (Score: {signal_data["score"]}/100)
+💰 Entry Price:   {signal_data["entry"]}
+🛑 Stop Loss:     {signal_data["stop_loss"]}  ({signal_data["sl_pips"]:+.1f} pips)
+🎯 Take Profit:   {signal_data["take_profit"]}  ({signal_data["tp_pips"]:+.1f} pips)
+⚖️ Risk/Reward:   {signal_data["rr_ratio"]}
+📉 RSI (14):      {signal_data["rsi"]}
+📊 H1 Trend:      {signal_data["h1_trend"]} {"✅" if signal_data["h1_trend"] == "BULLISH" else "❌"}
+📈 MACD:          {signal_data["macd_signal"]} {"✅" if signal_data["macd_signal"] == "BULLISH" else "❌"}
+⚠️ Risk Warning:
+
+Only risk 1-2% of your account per trade
+Move SL to breakeven when +1x ATR in profit
+WEAK signals = smaller position size"""
+        
+        # Add WEAK signal warning
+        if signal_data["strength"] == "WEAK":
+            message += f"""
+
+⚠️ WEAK SIGNAL — Market is ranging/unclear.
+Trade with caution or wait for stronger setup."""
+        
+        message += f"""
+
+⏱️ Generated: {signal_data["timestamp"]}"""
         
         return message
     
