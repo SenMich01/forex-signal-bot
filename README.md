@@ -257,6 +257,25 @@ The bot provides comprehensive logging:
    - Verify bot hasn't been blocked
    - Check Telegram API status
 
+### Webhook Issues
+
+If the bot is not responding to commands:
+
+1. **Manual Webhook Reset**: Visit this URL in your browser (replace with your actual bot token and app URL):
+   ```
+   https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=https://your-app-name.onrender.com/webhook
+   ```
+
+2. **Check Webhook Status**: 
+   ```
+   https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo
+   ```
+
+3. **Verify Environment Variables**:
+   - `TELEGRAM_BOT_TOKEN` is correct
+   - `APPLICATION_URL` matches your Render app URL
+   - `PORT` is set to `8080`
+
 ### Debug Mode
 
 Enable debug mode in `.env`:
