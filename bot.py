@@ -1,7 +1,7 @@
 import os
-import logging
 import asyncio
-from datetime import datetime
+import logging
+from aiohttp import web
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -11,7 +11,6 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
-from aiohttp import web
 
 load_dotenv()
 
@@ -25,9 +24,11 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 APP_URL = os.environ.get("APPLICATION_URL")
 PORT = int(os.environ.get("PORT", 8080))
 
-# ── Command Handlers ──────────────────────────────────
+# ── Build PTB Application ─────────────────────────────
+ptb_app = Application.builder().token(TOKEN).build()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ── Command Handlers ──────────────────────────────────
+async def start(update, context):
     await update.message.reply_text(
         "👋 Welcome to Forex Signal Bot!\n\n"
         "I monitor 7 forex pairs 24/5 and alert you\n"
@@ -38,7 +39,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Use /help to see all commands."
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(update, context):
     await update.message.reply_text(
         "📖 Available Commands:\n\n"
         "/start — Welcome message\n"
@@ -50,7 +51,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help — Show this message"
     )
 
-async def pairs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def pairs_command(update, context):
     await update.message.reply_text(
         "📊 Monitored Forex Pairs:\n\n"
         "1. USDJPY — US Dollar / Japanese Yen\n"
@@ -63,9 +64,9 @@ async def pairs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Use /signal EURUSD to check a specific pair."
     )
 
-async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def signal_command(update, context):
     from strategy import get_signal, is_market_open
-    
+
     if not context.args:
         await update.message.reply_text(
             "Please specify a pair.\nExample: /signal EURUSD"
@@ -92,9 +93,9 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(f"🔍 Analyzing {pair}...")
-    
+
     signal = get_signal(pair)
-    
+
     if signal.get("error"):
         await update.message.reply_text(
             f"⚠️ {signal['message']}\n\n"
@@ -104,7 +105,6 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     direction_emoji = "📈" if signal["direction"] == "BUY" else "📉"
     color = "🟢" if signal["direction"] == "BUY" else "🔴"
-    
     strength_emoji = {
         "STRONG": "✅",
         "MODERATE": "⚠️",
@@ -133,9 +133,9 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg)
 
-async def signalall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def signalall_command(update, context):
     from strategy import get_signal, is_market_open
-    
+
     if not is_market_open():
         await update.message.reply_text(
             "🔴 Market Closed on weekends.\n"
@@ -144,10 +144,10 @@ async def signalall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("🔍 Scanning all 7 pairs...")
-    
+
     pairs = ["USDJPY","EURUSD","GBPUSD","XAUUSD",
              "USDCAD","EURJPY","GBPJPY"]
-    
+
     lines = ["📊 FULL MARKET SCAN\n"]
     for pair in pairs:
         signal = get_signal(pair)
@@ -156,30 +156,31 @@ async def signalall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             d = "📈" if signal["direction"] == "BUY" else "📉"
             s = {"STRONG":"✅","MODERATE":"⚠️","WEAK":"❌"}.get(
-                signal["strength"],"⚠️")
+                signal["strength"], "⚠️")
             lines.append(
                 f"{pair}  {d} {signal['direction']}  "
                 f"{signal['strength']} {s}"
             )
-    
+
     lines.append("\n✅ STRONG = High confidence")
     lines.append("⚠️ MODERATE = Manage risk")
     lines.append("❌ WEAK = Avoid")
     lines.append("\nUse /signal EURUSD for full details.")
-    lines.append(f"⏱️ Scanned: {datetime.utcnow().strftime('%H:%M UTC')}")
-    
-    await update.message.reply_text("\n".join(lines))
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from data.subscribers import count_subscribers
-    await update.message.reply_text(
-        f"✅ Bot Status: Online\n"
-        f"📡 Webhook: Active\n"
-        f"📈 Pairs Monitored: 7\n"
-        f"👥 Subscribers: {count_subscribers()}"
+    lines.append(
+        f"⏱️ Scanned: "
+        f"{__import__('datetime').datetime.utcnow().strftime('%H:%M UTC')}"
     )
 
-async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("\n".join(lines))
+
+async def status_command(update, context):
+    await update.message.reply_text(
+        "✅ Bot Status: Online\n"
+        "📡 Webhook: Active\n"
+        "📈 Pairs Monitored: 7\n"
+    )
+
+async def debug_command(update, context):
     from data_fetcher import get_m5_candles, get_h1_candles
     pair = context.args[0].upper() if context.args else "EURUSD"
     await update.message.reply_text(f"🔧 Testing {pair}...")
@@ -199,49 +200,53 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Market may be closed or API issue."
         )
 
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def unknown(update, context):
     await update.message.reply_text(
         "❓ Unknown command.\nUse /help to see available commands."
     )
 
-# ── Health Check Route ─────────────────────────────────
+# ── Register Handlers ─────────────────────────────────
+ptb_app.add_handler(CommandHandler("start", start))
+ptb_app.add_handler(CommandHandler("help", help_command))
+ptb_app.add_handler(CommandHandler("pairs", pairs_command))
+ptb_app.add_handler(CommandHandler("signal", signal_command))
+ptb_app.add_handler(CommandHandler("signalall", signalall_command))
+ptb_app.add_handler(CommandHandler("status", status_command))
+ptb_app.add_handler(CommandHandler("debug", debug_command))
+ptb_app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
+# ── aiohttp Routes ────────────────────────────────────
 async def health(request):
-    return web.Response(text="Bot is running")
+    return web.Response(text="Bot is running ✅")
 
-# ── Main ──────────────────────────────────────────────
+async def webhook_handler(request):
+    data = await request.json()
+    update = Update.de_json(data, ptb_app.bot)
+    await ptb_app.process_update(update)
+    return web.Response(text="ok")
 
-async def main():
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .build()
-    )
+# ── Startup / Shutdown ────────────────────────────────
+async def on_startup(app):
+    await ptb_app.initialize()
+    await ptb_app.start()
+    webhook_url = f"{APP_URL}/webhook"
+    await ptb_app.bot.set_webhook(webhook_url)
+    logger.info(f"✅ Webhook set: {webhook_url}")
 
-    # Register all handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("pairs", pairs_command))
-    app.add_handler(CommandHandler("signal", signal_command))
-    app.add_handler(CommandHandler("signalall", signalall_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("debug", debug_command))
-    app.add_handler(MessageHandler(filters.COMMAND, unknown))
+async def on_shutdown(app):
+    await ptb_app.stop()
+    await ptb_app.shutdown()
 
-    # Add health check route to PTB's webserver
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=f"{APP_URL}/webhook",
-        url_path="webhook",
-        allowed_updates=Update.ALL_TYPES,
-        webserver_kwargs={
-            "routes": [
-                web.get("/", health),
-                web.get("/health", health),
-            ]
-        }
-    )
+# ── aiohttp App ───────────────────────────────────────
+def main():
+    aio_app = web.Application()
+    aio_app.router.add_get("/", health)
+    aio_app.router.add_get("/health", health)
+    aio_app.router.add_post("/webhook", webhook_handler)
+    aio_app.on_startup.append(on_startup)
+    aio_app.on_shutdown.append(on_shutdown)
+
+    web.run_app(aio_app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
