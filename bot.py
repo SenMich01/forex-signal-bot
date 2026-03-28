@@ -8,6 +8,7 @@ Runs as a Flask web server for webhook mode deployment with proper async integra
 import logging
 import os
 import asyncio
+import threading
 import requests
 from datetime import datetime
 from typing import Dict, Any
@@ -63,8 +64,14 @@ class ForexSignalBot:
             """Handle incoming webhook requests from Telegram."""
             try:
                 data = request.get_json(force=True)
-                update = Update.de_json(data, self.application.bot)
-                return self.run_async(self.application.process_update(update))
+                logger.info(f"Received update: {data}")
+                
+                # Return 200 immediately so Telegram stops retrying
+                threading.Thread(
+                    target=self.run_async,
+                    args=(self.process_update(data),)
+                ).start()
+                return "ok", 200
             except Exception as e:
                 logger.error(f"Error processing webhook: {e}")
                 return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -73,6 +80,11 @@ class ForexSignalBot:
         def health():
             """Health check endpoint."""
             return "Bot is running", 200
+    
+    async def process_update(self, data):
+        """Process update in background thread."""
+        update = Update.de_json(data, self.application.bot)
+        await self.application.process_update(update)
     
     def setup_handlers(self):
         """Set up Telegram command handlers."""
