@@ -10,6 +10,7 @@ import os
 import asyncio
 import threading
 import requests
+import time
 from datetime import datetime
 from typing import Dict, Any
 from flask import Flask, request, jsonify
@@ -51,6 +52,9 @@ class ForexSignalBot:
         self.scanner = get_scanner()
         self.app = Flask(__name__)
         
+        # Webhook registration tracking
+        self.webhook_registered = False
+        
         # Set up Flask routes
         self.setup_routes()
         # Set up Telegram handlers
@@ -80,6 +84,18 @@ class ForexSignalBot:
         def health():
             """Health check endpoint."""
             return "Bot is running", 200
+        
+        @self.app.route('/keep-alive', methods=['GET'])
+        def keep_alive():
+            """Keep-alive endpoint to prevent Render spindown."""
+            return "alive", 200
+        
+        @self.app.before_request
+        def register_webhook_once():
+            """Register webhook on first request after spinup."""
+            if not self.webhook_registered:
+                self.set_webhook()
+                self.webhook_registered = True
     
     async def process_update(self, data):
         """Process update in background thread."""
@@ -406,6 +422,21 @@ Trade with caution or wait for stronger setup."""
         
         logger.info(f"Scheduled scans every {SCAN_INTERVAL_MINUTES} minutes")
     
+    def set_webhook(self):
+        """Auto-register webhook on startup."""
+        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        app_url = os.environ.get("APPLICATION_URL")
+        webhook_url = f"{app_url}/webhook"
+        
+        api_url = f"https://api.telegram.org/bot{token}/setWebhook"
+        response = requests.post(api_url, json={"url": webhook_url})
+        result = response.json()
+        
+        if result.get("ok"):
+            print(f"✅ Webhook registered: {webhook_url}")
+        else:
+            print(f"❌ Webhook failed: {result}")
+    
     async def setup_webhook(self):
         """Set up webhook registration."""
         application_url = os.environ.get('APPLICATION_URL', '')
@@ -476,6 +507,20 @@ def set_webhook():
     else:
         print(f"❌ Webhook failed: {result}")
 
+def ping_self():
+    """Background thread to ping self every 10 minutes to prevent Render spindown."""
+    app_url = os.environ.get("APPLICATION_URL")
+    while True:
+        try:
+            time.sleep(600)  # every 10 minutes
+            response = requests.get(f"{app_url}/keep-alive")
+            if response.status_code == 200:
+                print("🏓 Self-ping sent to prevent spindown")
+            else:
+                print(f"Ping failed with status: {response.status_code}")
+        except Exception as e:
+            print(f"Ping error: {e}")
+
 def main():
     """Main entry point."""
     # Load environment variables
@@ -489,8 +534,9 @@ def main():
         logger.error("Please create a .env file with your bot token")
         return
     
-    # Auto-register webhook on startup
-    set_webhook()
+    # Start ping thread before Flask to prevent spindown
+    ping_thread = threading.Thread(target=ping_self, daemon=True)
+    ping_thread.start()
     
     # Create and start bot
     bot = ForexSignalBot(token)
