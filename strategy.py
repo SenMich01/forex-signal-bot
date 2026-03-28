@@ -217,9 +217,21 @@ def generate_signal_for_pair(pair: str) -> Optional[Dict]:
         h1_data = fetch_h1_data(pair)
         m5_data = fetch_m5_data(pair)
         
-        if h1_data is None or m5_data is None or len(m5_data) < 50:
-            logger.warning(f"Insufficient data for {pair}")
-            return None
+        if m5_data is None or len(m5_data) < 50:
+            logger.error(f"Not enough M5 data for {pair}")
+            return {
+                "pair": pair.replace("=X", ""),
+                "error": True,
+                "message": f"Could not fetch market data for {pair}. Market may be closed."
+            }
+            
+        if h1_data is None or len(h1_data) < 50:
+            logger.error(f"Not enough H1 data for {pair}")
+            return {
+                "pair": pair.replace("=X", ""),
+                "error": True,
+                "message": f"Could not fetch H1 data for {pair}."
+            }
         
         # Analyze H1 trend
         h1_trend = analyze_h1_trend(h1_data)
@@ -278,8 +290,12 @@ def generate_signal_for_pair(pair: str) -> Optional[Dict]:
         }
         
     except Exception as e:
-        logger.error(f"Error generating signal for {pair}: {str(e)}")
-        return None
+        logger.error(f"Strategy error for {pair}: {e}")
+        return {
+            "pair": pair.replace("=X", ""),
+            "error": True,
+            "message": f"Analysis error: {str(e)}"
+        }
 
 def generate_signals_for_all_pairs() -> List[Dict]:
     """Generate signals for all monitored pairs."""

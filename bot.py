@@ -98,6 +98,7 @@ class ForexSignalBot:
         self.application.add_handler(CommandHandler("signal", self.signal_command))
         self.application.add_handler(CommandHandler("signalall", self.signalall_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
+        self.application.add_handler(CommandHandler("debug", self.debug_command))
         
         # Add unknown command handler
         self.application.add_handler(MessageHandler(filters.COMMAND, self.unknown))
@@ -180,7 +181,7 @@ Use /signal EURUSD to check a specific pair."""
         from config import FOREX_PAIRS
         if pair_symbol not in FOREX_PAIRS:
             valid_pairs = [p.replace("=X", "") for p in FOREX_PAIRS]
-            await update.message.reply_text(f"❌ Invalid pair. Valid pairs: {', '.join(valid_pairs)}")
+            await update.message.reply_text(f"❌ Invalid pair: {pair_symbol}\n\nValid pairs:\n" + "\n".join(valid_pairs))
             return
         
         await update.message.reply_text(f"🔍 Analyzing {pair_symbol}...")
@@ -192,6 +193,17 @@ Use /signal EURUSD to check a specific pair."""
             signal_data = generate_signal_for_pair(pair_symbol)
             
             if signal_data:
+                # Check if it's an error signal
+                if signal_data.get("error"):
+                    await update.message.reply_text(
+                        f"⚠️ {signal_data['message']}\n\n"
+                        f"This usually means:\n"
+                        f"- Market is closed (weekend/holiday)\n"
+                        f"- Data provider temporarily unavailable\n"
+                        f"- Try again in a few minutes"
+                    )
+                    return
+                
                 message = self.format_signal_message_new(signal_data)
                 await update.message.reply_text(message)
             else:
@@ -249,6 +261,43 @@ Use /signal EURUSD to check a specific pair."""
 📈 Pairs Monitored: 7"""
         
         await update.message.reply_text(message)
+    
+    async def debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /debug command for testing data fetch."""
+        pair = "EURUSD"
+        if context.args:
+            pair = context.args[0].upper()
+        
+        await update.message.reply_text(f"🔧 Testing data fetch for {pair}...")
+        
+        try:
+            # Import data fetching functions
+            from data_fetcher import get_m5_candles, get_h1_candles
+            
+            m5 = get_m5_candles(pair)
+            h1 = get_h1_candles(pair)
+            
+            if m5 is not None and not m5.empty:
+                latest = m5.iloc[-1]
+                msg = (
+                    f"✅ Data fetch working!\n\n"
+                    f"Pair: {pair}\n"
+                    f"M5 candles: {len(m5)}\n"
+                    f"H1 candles: {len(h1) if h1 is not None else 0}\n"
+                    f"Latest close: {latest['close']:.5f}\n"
+                    f"Latest time: {m5.index[-1]}"
+                )
+            else:
+                msg = (
+                    f"❌ Data fetch FAILED for {pair}\n"
+                    f"Market may be closed or API issue."
+                )
+            
+            await update.message.reply_text(msg)
+            
+        except Exception as e:
+            logger.error(f"Debug command error: {e}")
+            await update.message.reply_text(f"❌ Debug error: {str(e)}")
     
     async def unknown(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle unknown commands."""
@@ -412,6 +461,21 @@ Trade with caution or wait for stronger setup."""
         logger.info(f"Starting Flask server on port {port}")
         self.app.run(host="0.0.0.0", port=port)
 
+def set_webhook():
+    """Auto-register webhook on startup."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    app_url = os.environ.get("APPLICATION_URL")
+    webhook_url = f"{app_url}/webhook"
+    
+    api_url = f"https://api.telegram.org/bot{token}/setWebhook"
+    response = requests.post(api_url, json={"url": webhook_url})
+    result = response.json()
+    
+    if result.get("ok"):
+        print(f"✅ Webhook set successfully: {webhook_url}")
+    else:
+        print(f"❌ Webhook failed: {result}")
+
 def main():
     """Main entry point."""
     # Load environment variables
@@ -424,6 +488,9 @@ def main():
         logger.error("TELEGRAM_BOT_TOKEN not found in environment variables")
         logger.error("Please create a .env file with your bot token")
         return
+    
+    # Auto-register webhook on startup
+    set_webhook()
     
     # Create and start bot
     bot = ForexSignalBot(token)

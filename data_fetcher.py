@@ -1,7 +1,7 @@
 """
 Data fetching module using yfinance for Forex market data.
 
-Handles fetching M5 and H1 candle data for all monitored pairs.
+Handles fetching M5 and H1 candle data for all monitored pairs with proper error handling.
 """
 
 import yfinance as yf
@@ -15,9 +15,65 @@ import warnings
 # Suppress yfinance warnings
 warnings.filterwarnings('ignore', category=UserWarning)
 
-from config import DATA_CONFIG, FOREX_PAIRS
-
 logger = logging.getLogger(__name__)
+
+# Pair ticker mapping
+PAIR_TICKER_MAP = {
+    "USDJPY": "USDJPY=X",
+    "EURUSD": "EURUSD=X", 
+    "GBPUSD": "GBPUSD=X",
+    "XAUUSD": "GC=F",       # Gold futures - more reliable
+    "USDCAD": "USDCAD=X",
+    "EURJPY": "EURJPY=X",
+    "GBPJPY": "GBPJPY=X"
+}
+
+def get_candles(pair, interval="5m", period="2d"):
+    """Fetch candles with proper error handling and debug logging."""
+    ticker = PAIR_TICKER_MAP.get(pair.upper())
+    if not ticker:
+        logger.error(f"Unknown pair: {pair}")
+        return None
+    
+    try:
+        logger.info(f"Fetching {pair} ({ticker}) interval={interval}")
+        df = yf.download(
+            ticker,
+            interval=interval,
+            period=period,
+            auto_adjust=True,
+            progress=False
+        )
+        
+        if df is None or df.empty:
+            logger.error(f"No data returned for {pair}")
+            return None
+            
+        # Flatten MultiIndex columns if present
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        
+        # Rename columns to lowercase
+        df.columns = [c.lower() for c in df.columns]
+        
+        # Add timestamp column
+        df['timestamp'] = df.index
+        df = df.reset_index(drop=True)
+        
+        logger.info(f"✅ Got {len(df)} candles for {pair}")
+        return df
+        
+    except Exception as e:
+        logger.error(f"❌ yfinance error for {pair}: {e}")
+        return None
+
+def get_m5_candles(pair):
+    """Get M5 candles for a pair."""
+    return get_candles(pair, interval="5m", period="2d")
+
+def get_h1_candles(pair):
+    """Get H1 candles for a pair."""
+    return get_candles(pair, interval="1h", period="7d")
 
 class DataFetcher:
     """Handles fetching and preprocessing of Forex market data."""
@@ -37,14 +93,24 @@ class DataFetcher:
         Returns:
             DataFrame with OHLCV data or None if fetch failed
         """
-        config_key = timeframe.upper()
-        if config_key not in DATA_CONFIG:
-            logger.error(f"Unknown timeframe: {timeframe}")
-            return None
-        
-        config = DATA_CONFIG[config_key]
-        
         try:
+            # Get the correct ticker
+            ticker = PAIR_TICKER_MAP.get(pair.upper())
+            if not ticker:
+                logger.error(f"Unknown pair: {pair}")
+                return None
+            
+            # Determine interval and period based on timeframe
+            if timeframe.upper() == "M5":
+                interval = "5m"
+                period = "2d"
+            elif timeframe.upper() == "H1":
+                interval = "1h"
+                period = "7d"
+            else:
+                logger.error(f"Unknown timeframe: {timeframe}")
+                return None
+            
             # Create cache key
             cache_key = f"{pair}_{timeframe}"
             
@@ -55,22 +121,18 @@ class DataFetcher:
                 if datetime.now() - last_fetch < timedelta(minutes=1):
                     return self.cache[cache_key]
             
-            logger.info(f"Fetching {timeframe} data for {pair}")
+            logger.info(f"Fetching {timeframe} data for {pair} ({ticker})")
             
-            # Fetch data from yfinance
-            ticker = yf.Ticker(pair)
-            data = ticker.history(
-                interval=config["interval"],
-                period=config["period"]
-            )
+            # Fetch data using our improved function
+            data = get_candles(pair, interval, period)
             
-            if data.empty:
+            if data is None or data.empty:
                 logger.warning(f"No data returned for {pair}")
                 return None
             
-            # Validate minimum candles requirement
-            if len(data) < config["candles_required"]:
-                logger.warning(f"Insufficient data for {pair}: {len(data)} candles (need {config['candles_required']})")
+            # Validate minimum data requirement
+            if len(data) < 50:  # Minimum 50 candles required
+                logger.warning(f"Insufficient data for {pair}: {len(data)} candles (need 50)")
                 return None
             
             # Preprocess data
@@ -98,20 +160,6 @@ class DataFetcher:
         Returns:
             Preprocessed DataFrame with required columns
         """
-        # Reset index to make datetime a column
-        data = data.reset_index()
-        
-        # Rename columns to standard format
-        data = data.rename(columns={
-            'Datetime': 'timestamp' if timeframe == "M5" else 'timestamp',
-            'Date': 'timestamp' if timeframe == "H1" else 'timestamp',
-            'Open': 'open',
-            'High': 'high',
-            'Low': 'low',
-            'Close': 'close',
-            'Volume': 'volume'
-        })
-        
         # Ensure timestamp is datetime
         data['timestamp'] = pd.to_datetime(data['timestamp'])
         
@@ -140,6 +188,9 @@ class DataFetcher:
             Dictionary mapping pair symbols to DataFrames
         """
         results = {}
+        
+        # Import FOREX_PAIRS from config
+        from config import FOREX_PAIRS
         
         for pair in FOREX_PAIRS:
             data = self.fetch_data(pair, timeframe)
