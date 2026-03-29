@@ -38,7 +38,7 @@ app = Flask(__name__)
 
 # ── Webhook Registration Function ─────────────────────
 def set_webhook():
-    """Register webhook with Telegram API"""
+    """Register webhook with Telegram API - with retry logic"""
     if not TOKEN:
         logger.error("❌ BOT_TOKEN not found in environment variables")
         return False
@@ -54,27 +54,61 @@ def set_webhook():
     # Telegram API endpoint for setting webhook
     api_url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
     
-    try:
-        response = requests.post(api_url, json={
-            "url": webhook_url,
-            "allowed_updates": ["message", "callback_query", "inline_query"]
-        })
-        
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("ok"):
-                logger.info("✅ Webhook registered successfully!")
-                return True
-            else:
-                logger.error(f"❌ Webhook registration failed: {result.get('description')}")
-                return False
-        else:
-            logger.error(f"❌ Webhook registration failed with status {response.status_code}")
-            return False
+    # Retry logic with exponential backoff
+    max_retries = 3
+    retry_delay = 5  # Start with 5 seconds
+    
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"📡 Attempting webhook registration (attempt {attempt + 1}/{max_retries})")
             
-    except Exception as e:
-        logger.error(f"❌ Error setting webhook: {e}")
-        return False
+            response = requests.post(api_url, json={
+                "url": webhook_url,
+                "allowed_updates": ["message", "callback_query", "inline_query"]
+            })
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("ok"):
+                    logger.info("✅ Webhook registered successfully!")
+                    return True
+                else:
+                    error_msg = result.get('description', 'Unknown error')
+                    logger.error(f"❌ Webhook registration failed: {error_msg}")
+                    
+                    # Don't retry on certain errors
+                    if "bad webhook" in error_msg.lower() or "invalid" in error_msg.lower():
+                        logger.error("❌ Webhook URL appears invalid, not retrying")
+                        return False
+                    
+                    if attempt < max_retries - 1:
+                        logger.info(f"⏳ Waiting {retry_delay} seconds before retry...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        logger.error("❌ Max retries reached, webhook registration failed")
+                        return False
+            else:
+                logger.error(f"❌ Webhook registration failed with status {response.status_code}")
+                if attempt < max_retries - 1:
+                    logger.info(f"⏳ Waiting {retry_delay} seconds before retry...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    logger.error("❌ Max retries reached, webhook registration failed")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"❌ Error setting webhook (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                logger.info(f"⏳ Waiting {retry_delay} seconds before retry...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                logger.error("❌ Max retries reached, webhook registration failed")
+                return False
+    
+    return False
 
 # ── Command Handlers ──────────────────────────────────
 async def start(update, context):
@@ -256,7 +290,7 @@ async def status_command(update, context):
     try:
         await update.message.reply_text(
             f"✅ Bot Status: Online\n"
-            f"📡 Mode: Polling (No webhook needed)\n"
+            f"📡 Mode: Webhook (Auto-registered)\n"
             f"📈 Pairs Monitored: 7\n"
             f"🔧 Last Check: {time.strftime('%H:%M:%S UTC', time.gmtime())}"
         )
@@ -343,6 +377,10 @@ async def main():
         
         # Initialize the application
         await ptb_app.initialize()
+        
+        # Add 5-second delay before setting webhook to ensure server is ready
+        logger.info("⏳ Waiting 5 seconds before setting webhook...")
+        time.sleep(5)
         
         # Set webhook automatically
         if set_webhook():
