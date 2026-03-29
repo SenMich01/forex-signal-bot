@@ -280,9 +280,6 @@ async def main():
         await ptb_app.updater.start_polling(
             poll_interval=1.0,
             timeout=60,
-            read_timeout=60,
-            write_timeout=60,
-            connect_timeout=60,
             drop_pending_updates=False
         )
         
