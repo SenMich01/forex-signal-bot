@@ -38,7 +38,7 @@ app = Flask(__name__)
 
 # ── Webhook Registration Function ─────────────────────
 def set_webhook():
-    """Register webhook with Telegram API - with retry logic"""
+    """Register webhook with Telegram API - with retry logic and verification"""
     if not TOKEN:
         logger.error("❌ BOT_TOKEN not found in environment variables")
         return False
@@ -71,7 +71,17 @@ def set_webhook():
                 result = response.json()
                 if result.get("ok"):
                     logger.info("✅ Webhook registered successfully!")
-                    return True
+                    # Verify webhook was actually set
+                    if verify_webhook():
+                        return True
+                    else:
+                        logger.warning("⚠️ Webhook registration response OK but verification failed")
+                        if attempt < max_retries - 1:
+                            logger.info(f"⏳ Waiting {retry_delay} seconds before retry...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                        else:
+                            return False
                 else:
                     error_msg = result.get('description', 'Unknown error')
                     logger.error(f"❌ Webhook registration failed: {error_msg}")
@@ -109,6 +119,49 @@ def set_webhook():
                 return False
     
     return False
+
+def verify_webhook():
+    """Verify that webhook is properly set by checking Telegram API"""
+    try:
+        api_url = f"https://api.telegram.org/bot{TOKEN}/getWebhookInfo"
+        response = requests.get(api_url)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("ok"):
+                webhook_info = result.get("result", {})
+                webhook_url = webhook_info.get("url", "")
+                expected_url = f"{RENDER_EXTERNAL_URL}/webhook"
+                
+                if webhook_url == expected_url:
+                    logger.info("✅ Webhook verification successful!")
+                    return True
+                else:
+                    logger.warning(f"⚠️ Webhook URL mismatch. Expected: {expected_url}, Got: {webhook_url}")
+                    return False
+            else:
+                logger.error(f"❌ getWebhookInfo failed: {result.get('description')}")
+                return False
+        else:
+            logger.error(f"❌ getWebhookInfo failed with status {response.status_code}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Error verifying webhook: {e}")
+        return False
+
+def check_and_set_webhook():
+    """Check if webhook is set and set it if not"""
+    try:
+        # First check if webhook is already set correctly
+        if verify_webhook():
+            logger.info("✅ Webhook already properly configured")
+            return True
+        
+        logger.info("📡 Webhook not set or incorrect, attempting to set...")
+        return set_webhook()
+    except Exception as e:
+        logger.error(f"❌ Error in check_and_set_webhook: {e}")
+        return False
 
 # ── Command Handlers ──────────────────────────────────
 async def start(update, context):
@@ -342,8 +395,38 @@ ptb_app.add_handler(MessageHandler(filters.COMMAND, unknown))
 # ── Flask Endpoints ───────────────────────────────────
 @app.route("/")
 def home():
-    """Root endpoint - returns bot status"""
-    return "Bot is running"
+    """Health check endpoint - keeps Render service alive and provides UptimeRobot target"""
+    return jsonify({
+        "status": "healthy",
+        "message": "Forex Signal Bot is running",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "webhook_verified": verify_webhook()
+    }), 200
+
+@app.route("/health")
+def health_check():
+    """Alternative health check endpoint"""
+    return jsonify({
+        "status": "ok",
+        "service": "forex-signal-bot",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }), 200
+
+@app.route("/webhook-status")
+def webhook_status():
+    """Check webhook status"""
+    try:
+        is_set = verify_webhook()
+        return jsonify({
+            "webhook_set": is_set,
+            "expected_url": f"{RENDER_EXTERNAL_URL}/webhook" if RENDER_EXTERNAL_URL else None,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }), 500
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -369,6 +452,32 @@ def webhook():
         logger.error(f"❌ Error processing webhook: {e}")
         return jsonify({"error": str(e)}), 500
 
+# ── Keep-Alive Mechanism ──────────────────────────────
+def start_keep_alive():
+    """Start a background thread to ping the health endpoint and keep Render awake"""
+    import threading
+    
+    def keep_alive_worker():
+        """Background worker that pings the health endpoint every 10 minutes"""
+        while True:
+            try:
+                # Ping our own health endpoint to keep Render service awake
+                response = requests.get(f"http://localhost:{PORT}/health", timeout=10)
+                if response.status_code == 200:
+                    logger.info("✅ Keep-alive ping successful")
+                else:
+                    logger.warning(f"⚠️ Keep-alive ping returned status {response.status_code}")
+            except Exception as e:
+                logger.error(f"❌ Keep-alive ping failed: {e}")
+            
+            # Wait 10 minutes before next ping (Render spins down after 15 minutes)
+            time.sleep(600)  # 10 minutes
+    
+    # Start keep-alive thread
+    keep_alive_thread = threading.Thread(target=keep_alive_worker, daemon=True)
+    keep_alive_thread.start()
+    logger.info("🔄 Keep-alive mechanism started (pings every 10 minutes)")
+
 # ── Webhook Mode Setup ────────────────────────────────
 async def main():
     """Start the bot with webhook mode on Render."""
@@ -378,15 +487,18 @@ async def main():
         # Initialize the application
         await ptb_app.initialize()
         
+        # Start keep-alive mechanism to prevent Render spin-down
+        start_keep_alive()
+        
         # Add 5-second delay before setting webhook to ensure server is ready
         logger.info("⏳ Waiting 5 seconds before setting webhook...")
         time.sleep(5)
         
-        # Set webhook automatically
-        if set_webhook():
-            logger.info("✅ Webhook registered successfully")
+        # Check and set webhook automatically (verifies it's properly configured)
+        if check_and_set_webhook():
+            logger.info("✅ Webhook properly configured and verified")
         else:
-            logger.error("❌ Failed to register webhook")
+            logger.error("❌ Failed to configure webhook")
             return
         
         # Start the application
