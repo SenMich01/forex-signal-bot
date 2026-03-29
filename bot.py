@@ -283,10 +283,9 @@ async def main():
             drop_pending_updates=False
         )
         
-        # Keep the bot running
-        await ptb_app.updater.stop()
-        await ptb_app.stop()
-        await ptb_app.shutdown()
+        # Keep the bot running indefinitely
+        # The bot will run until interrupted (Ctrl+C) or the process is killed
+        await asyncio.Event().wait()
         
     except Exception as e:
         logger.error(f"❌ Error starting bot: {e}")
