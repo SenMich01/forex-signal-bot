@@ -478,36 +478,33 @@ def start_keep_alive():
     keep_alive_thread.start()
     logger.info("🔄 Keep-alive mechanism started (pings every 10 minutes)")
 
-# ── Webhook Mode Setup ────────────────────────────────
+# ── Polling Mode Setup ────────────────────────────────
 async def main():
-    """Start the bot with webhook mode on Render."""
+    """Start the bot with polling mode for reliable Telegram communication."""
     try:
-        logger.info("🤖 Starting Forex Signal Bot with webhook mode...")
+        logger.info("🤖 Starting Forex Signal Bot with polling mode...")
         
         # Initialize the application
         await ptb_app.initialize()
         
-        # Start keep-alive mechanism to prevent Render spin-down
-        start_keep_alive()
-        
-        # Add 5-second delay before setting webhook to ensure server is ready
-        logger.info("⏳ Waiting 5 seconds before setting webhook...")
-        time.sleep(5)
-        
-        # Check and set webhook automatically (verifies it's properly configured)
-        if check_and_set_webhook():
-            logger.info("✅ Webhook properly configured and verified")
-        else:
-            logger.error("❌ Failed to configure webhook")
-            return
-        
         # Start the application
         await ptb_app.start()
-        logger.info("✅ Bot started successfully with webhook mode")
+        logger.info("✅ Bot started successfully with polling mode")
         
-        # Start Flask server
-        logger.info(f"🌐 Starting Flask server on 0.0.0.0:{PORT}")
-        app.run(host="0.0.0.0", port=PORT, debug=False)
+        # Start polling for updates (this is the main loop)
+        logger.info("📡 Starting polling for Telegram updates...")
+        await ptb_app.updater.start_polling(
+            poll_interval=1.0,  # Check for updates every second
+            timeout=20,         # Wait up to 20 seconds for updates
+            drop_pending_updates=True  # Skip old updates on startup
+        )
+        
+        logger.info("✅ Bot is now running and responding to commands!")
+        logger.info("💡 Send /start to the bot on Telegram to begin")
+        
+        # Keep the bot running
+        await ptb_app.updater.stop()
+        await ptb_app.stop()
         
     except Exception as e:
         logger.error(f"❌ Error starting bot: {e}")
