@@ -1,33 +1,31 @@
 import os
-import asyncio
 import logging
 import time
-from aiohttp import web
-from dotenv import load_dotenv
+from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     filters,
-    ContextTypes
+    ContextTypes,
+    CallbackContext
 )
 
+# Load environment variables
+from dotenv import load_dotenv
 load_dotenv()
 
+# Configure logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
+# Environment variables
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-APP_URL = os.environ.get("APPLICATION_URL")
 PORT = int(os.environ.get("PORT", 8080))
-
-# Global variables to track webhook status
-webhook_registered = False
-webhook_registration_failed = False
 
 # ── Build PTB Application ─────────────────────────────
 ptb_app = Application.builder().token(TOKEN).build()
@@ -114,8 +112,9 @@ async def signal_command(update, context):
 
         if signal.get("error"):
             await update.message.reply_text(
-                f"⚠️ {signal['message']}\n\n"
-                "Try again in a few minutes."
+                f"⚠️ Could not get signal for {pair}\n\n"
+                f"Reason: {signal['message']}\n\n"
+                f"Try /debug {pair} to check data feed."
             )
             return
 
@@ -127,11 +126,19 @@ async def signal_command(update, context):
             "WEAK": "❌"
         }.get(signal["strength"], "⚠️")
 
+        weak_warning = ""
+        if signal["strength"] == "WEAK":
+            weak_warning = (
+                "\n⚠️ WEAK SIGNAL — Market is ranging.\n"
+                "Consider waiting for a stronger setup.\n"
+            )
+
         msg = (
             f"📊 FOREX SIGNAL — {pair}\n\n"
             f"{direction_emoji} Direction: {signal['direction']} {color}\n"
             f"💪 Strength: {signal['strength']} {strength_emoji} "
-            f"(Score: {signal['score']}/100)\n\n"
+            f"(Score: {signal['score']}/100)\n"
+            f"{weak_warning}\n"
             f"💰 Entry:       {signal['entry']}\n"
             f"🛑 Stop Loss:   {signal['stop_loss']}  "
             f"(-{signal['sl_pips']:.1f} pips)\n"
@@ -149,8 +156,11 @@ async def signal_command(update, context):
         )
         await update.message.reply_text(msg)
     except Exception as e:
-        logger.error(f"Error in signal command: {e}")
-        await update.message.reply_text("❌ Error processing signal. Please try again later.")
+        logger.exception(f"signal_command error: {e}")
+        await update.message.reply_text(
+            f"❌ Unexpected error: {str(e)}\n\n"
+            f"Try /debug {pair} to diagnose."
+        )
 
 async def signalall_command(update, context):
     try:
@@ -188,7 +198,7 @@ async def signalall_command(update, context):
         lines.append("\nUse /signal EURUSD for full details.")
         lines.append(
             f"⏱️ Scanned: "
-            f"{__import__('datetime').datetime.utcnow().strftime('%H:%M UTC')}"
+            f"{datetime.now(timezone.utc).strftime('%H:%M UTC')}"
         )
 
         await update.message.reply_text("\n".join(lines))
@@ -198,15 +208,9 @@ async def signalall_command(update, context):
 
 async def status_command(update, context):
     try:
-        global webhook_registered, webhook_registration_failed
-        
-        webhook_status = "✅ Active" if webhook_registered else "❌ Not Registered"
-        if webhook_registration_failed:
-            webhook_status += " (Failed)"
-            
         await update.message.reply_text(
             f"✅ Bot Status: Online\n"
-            f"📡 Webhook: {webhook_status}\n"
+            f"📡 Mode: Polling (No webhook needed)\n"
             f"📈 Pairs Monitored: 7\n"
             f"🔧 Last Check: {time.strftime('%H:%M:%S UTC', time.gmtime())}"
         )
@@ -255,107 +259,47 @@ ptb_app.add_handler(CommandHandler("status", status_command))
 ptb_app.add_handler(CommandHandler("debug", debug_command))
 ptb_app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-# ── aiohttp Routes ────────────────────────────────────
-async def health(request):
-    return web.Response(text="Bot is running ✅")
-
-async def webhook_handler(request):
+# ── Polling Mode Setup ────────────────────────────────
+async def main():
+    """Start the bot with polling mode instead of webhooks."""
     try:
-        data = await request.json()
-        update = Update.de_json(data, ptb_app.bot)
-        await ptb_app.process_update(update)
-        return web.Response(text="ok")
-    except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        return web.Response(text="error", status=500)
-
-async def check_webhook_status(request):
-    """Endpoint to check webhook registration status"""
-    global webhook_registered, webhook_registration_failed
-    
-    status = {
-        "webhook_registered": webhook_registered,
-        "webhook_registration_failed": webhook_registration_failed,
-        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())
-    }
-    return web.json_response(status)
-
-# ── Webhook Registration with Retry Logic ───────────────
-async def register_webhook_with_retry(max_retries=5, delay=2):
-    """Register webhook with retry logic and exponential backoff"""
-    global webhook_registered, webhook_registration_failed
-    
-    webhook_url = f"{APP_URL}/webhook"
-    
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"Attempting webhook registration (attempt {attempt + 1}/{max_retries})")
-            await ptb_app.bot.set_webhook(webhook_url)
-            webhook_registered = True
-            webhook_registration_failed = False
-            logger.info(f"✅ Webhook successfully registered: {webhook_url}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Webhook registration failed (attempt {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                wait_time = delay * (2 ** attempt)  # Exponential backoff
-                logger.info(f"Retrying in {wait_time} seconds...")
-                await asyncio.sleep(wait_time)
-    
-    # If all retries failed
-    webhook_registration_failed = True
-    logger.error("❌ Failed to register webhook after all retry attempts")
-    return False
-
-# ── Startup / Shutdown ────────────────────────────────
-async def on_startup(app):
-    global webhook_registered, webhook_registration_failed
-    
-    try:
-        logger.info("🚀 Starting Forex Signal Bot...")
+        logger.info("🤖 Starting Forex Signal Bot with polling mode...")
+        
+        # Remove any existing webhook first
+        await ptb_app.bot.delete_webhook()
+        logger.info("✅ Webhook removed (polling mode)")
+        
+        # Initialize and start the application
         await ptb_app.initialize()
         await ptb_app.start()
         
-        # Register webhook with retry logic
-        success = await register_webhook_with_retry()
+        logger.info("✅ Bot started successfully with polling mode")
+        logger.info("📡 Bot is now listening for commands...")
         
-        if not success:
-            logger.warning("⚠️ Webhook registration failed, but bot will continue running")
-            logger.warning("You may need to manually register the webhook using:")
-            logger.warning(f"curl -X POST https://api.telegram.org/bot{TOKEN}/setWebhook?url={APP_URL}/webhook")
-    
-    except Exception as e:
-        logger.error(f"❌ Error during startup: {e}")
-        webhook_registration_failed = True
-
-async def on_shutdown(app):
-    try:
-        logger.info("🛑 Shutting down Forex Signal Bot...")
+        # Start polling (this keeps the bot running continuously)
+        await ptb_app.updater.start_polling(
+            poll_interval=1.0,
+            timeout=60,
+            read_timeout=60,
+            write_timeout=60,
+            connect_timeout=60,
+            drop_pending_updates=False
+        )
+        
+        # Keep the bot running
+        await ptb_app.updater.stop()
         await ptb_app.stop()
         await ptb_app.shutdown()
+        
     except Exception as e:
-        logger.error(f"Error during shutdown: {e}")
-
-# ── aiohttp App ───────────────────────────────────────
-def main():
-    aio_app = web.Application()
-    
-    # Routes
-    aio_app.router.add_get("/", health)
-    aio_app.router.add_get("/health", health)
-    aio_app.router.add_get("/webhook-status", check_webhook_status)
-    aio_app.router.add_post("/webhook", webhook_handler)
-    
-    # Startup/Shutdown
-    aio_app.on_startup.append(on_startup)
-    aio_app.on_shutdown.append(on_shutdown)
-
-    logger.info(f"🌐 Starting web server on port {PORT}")
-    logger.info(f"📍 Application URL: {APP_URL}")
-    logger.info(f"🔗 Webhook URL: {APP_URL}/webhook")
-    
-    web.run_app(aio_app, host="0.0.0.0", port=PORT)
+        logger.error(f"❌ Error starting bot: {e}")
+        raise
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user")
+    except Exception as e:
+        logger.error(f"❌ Bot crashed: {e}")
