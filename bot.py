@@ -1,7 +1,9 @@
 import os
 import logging
 import time
+import requests
 from datetime import datetime, timezone
+from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -26,9 +28,53 @@ logger = logging.getLogger(__name__)
 # Environment variables
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 PORT = int(os.environ.get("PORT", 8080))
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
 # ── Build PTB Application ─────────────────────────────
 ptb_app = Application.builder().token(TOKEN).build()
+
+# ── Flask Web Server Setup ────────────────────────────
+app = Flask(__name__)
+
+# ── Webhook Registration Function ─────────────────────
+def set_webhook():
+    """Register webhook with Telegram API"""
+    if not TOKEN:
+        logger.error("❌ BOT_TOKEN not found in environment variables")
+        return False
+    
+    if not RENDER_EXTERNAL_URL:
+        logger.error("❌ RENDER_EXTERNAL_URL not found in environment variables")
+        return False
+    
+    # Construct webhook URL
+    webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
+    logger.info(f"📡 Setting webhook URL: {webhook_url}")
+    
+    # Telegram API endpoint for setting webhook
+    api_url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
+    
+    try:
+        response = requests.post(api_url, json={
+            "url": webhook_url,
+            "allowed_updates": ["message", "callback_query", "inline_query"]
+        })
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("ok"):
+                logger.info("✅ Webhook registered successfully!")
+                return True
+            else:
+                logger.error(f"❌ Webhook registration failed: {result.get('description')}")
+                return False
+        else:
+            logger.error(f"❌ Webhook registration failed with status {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Error setting webhook: {e}")
+        return False
 
 # ── Command Handlers ──────────────────────────────────
 async def start(update, context):
@@ -259,33 +305,59 @@ ptb_app.add_handler(CommandHandler("status", status_command))
 ptb_app.add_handler(CommandHandler("debug", debug_command))
 ptb_app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-# ── Polling Mode Setup ────────────────────────────────
-async def main():
-    """Start the bot with polling mode instead of webhooks."""
+# ── Flask Endpoints ───────────────────────────────────
+@app.route("/")
+def home():
+    """Root endpoint - returns bot status"""
+    return "Bot is running"
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    """Webhook endpoint to receive updates from Telegram"""
     try:
-        logger.info("🤖 Starting Forex Signal Bot with polling mode...")
+        # Get JSON data from Telegram
+        json_data = request.get_json()
         
-        # Remove any existing webhook first
-        await ptb_app.bot.delete_webhook()
-        logger.info("✅ Webhook removed (polling mode)")
+        if not json_data:
+            logger.warning("⚠️ Received empty webhook data")
+            return jsonify({"error": "No data received"}), 400
         
-        # Initialize and start the application
+        # Create Update object from JSON
+        update = Update.de_json(json_data, ptb_app.bot)
+        
+        # Process the update through the bot application
+        ptb_app.process_update(update)
+        
+        logger.info(f"✅ Processed update: {update.update_id}")
+        return jsonify({"status": "ok"}), 200
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing webhook: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# ── Webhook Mode Setup ────────────────────────────────
+async def main():
+    """Start the bot with webhook mode on Render."""
+    try:
+        logger.info("🤖 Starting Forex Signal Bot with webhook mode...")
+        
+        # Initialize the application
         await ptb_app.initialize()
+        
+        # Set webhook automatically
+        if set_webhook():
+            logger.info("✅ Webhook registered successfully")
+        else:
+            logger.error("❌ Failed to register webhook")
+            return
+        
+        # Start the application
         await ptb_app.start()
+        logger.info("✅ Bot started successfully with webhook mode")
         
-        logger.info("✅ Bot started successfully with polling mode")
-        logger.info("📡 Bot is now listening for commands...")
-        
-        # Start polling (this keeps the bot running continuously)
-        await ptb_app.updater.start_polling(
-            poll_interval=1.0,
-            timeout=60,
-            drop_pending_updates=False
-        )
-        
-        # Keep the bot running indefinitely
-        # The bot will run until interrupted (Ctrl+C) or the process is killed
-        await asyncio.Event().wait()
+        # Start Flask server
+        logger.info(f"🌐 Starting Flask server on 0.0.0.0:{PORT}")
+        app.run(host="0.0.0.0", port=PORT, debug=False)
         
     except Exception as e:
         logger.error(f"❌ Error starting bot: {e}")
