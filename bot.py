@@ -374,6 +374,27 @@ async def debug_command(update, context):
         logger.error(f"Error in debug command: {e}")
         await update.message.reply_text("❌ Error running debug. Please try again later.")
 
+async def setwebhook_command(update, context):
+    """Manually set the webhook"""
+    try:
+        if check_and_set_webhook():
+            await update.message.reply_text(
+                "✅ Webhook set successfully!\n\n"
+                "The bot is now ready to receive messages.\n"
+                "Use /status to check webhook status."
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Failed to set webhook.\n\n"
+                "Please check:\n"
+                "1. RENDER_EXTERNAL_URL environment variable\n"
+                "2. Bot token is correct\n"
+                "3. Try again in a few minutes"
+            )
+    except Exception as e:
+        logger.error(f"Error in setwebhook command: {e}")
+        await update.message.reply_text("❌ Error setting webhook. Please try again later.")
+
 async def unknown(update, context):
     try:
         await update.message.reply_text(
@@ -478,33 +499,28 @@ def start_keep_alive():
     keep_alive_thread.start()
     logger.info("🔄 Keep-alive mechanism started (pings every 10 minutes)")
 
-# ── Polling Mode Setup ────────────────────────────────
+# ── Webhook Mode Setup ────────────────────────────────
 async def main():
-    """Start the bot with polling mode for reliable Telegram communication."""
+    """Start the bot with webhook mode on Render."""
     try:
-        logger.info("🤖 Starting Forex Signal Bot with polling mode...")
+        logger.info("🤖 Starting Forex Signal Bot with webhook mode...")
         
         # Initialize the application
         await ptb_app.initialize()
         
+        # Start keep-alive mechanism to prevent Render spin-down
+        start_keep_alive()
+        
+        # Note: Webhook setup is now manual - user must set it via /setwebhook command
+        logger.info("⚠️ Webhook setup is manual - use /setwebhook command to configure")
+        
         # Start the application
         await ptb_app.start()
-        logger.info("✅ Bot started successfully with polling mode")
+        logger.info("✅ Bot started successfully with webhook mode")
         
-        # Start polling for updates (this is the main loop)
-        logger.info("📡 Starting polling for Telegram updates...")
-        await ptb_app.updater.start_polling(
-            poll_interval=1.0,  # Check for updates every second
-            timeout=20,         # Wait up to 20 seconds for updates
-            drop_pending_updates=True  # Skip old updates on startup
-        )
-        
-        logger.info("✅ Bot is now running and responding to commands!")
-        logger.info("💡 Send /start to the bot on Telegram to begin")
-        
-        # Keep the bot running
-        await ptb_app.updater.stop()
-        await ptb_app.stop()
+        # Start Flask server
+        logger.info(f"🌐 Starting Flask server on 0.0.0.0:{PORT}")
+        app.run(host="0.0.0.0", port=PORT, debug=False)
         
     except Exception as e:
         logger.error(f"❌ Error starting bot: {e}")
