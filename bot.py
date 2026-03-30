@@ -1,573 +1,236 @@
 import os
-import asyncio
 import logging
-import time
-import requests
 from datetime import datetime, timezone
 from aiohttp import web
+from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     filters,
-    ContextTypes,
-    CallbackContext
 )
 
-# Load environment variables
-from dotenv import load_dotenv
 load_dotenv()
 
-# Configure logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Environment variables
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-PORT = int(os.environ.get("PORT", 8080))
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN")
+APP_URL = os.environ.get("APPLICATION_URL", "").rstrip("/")
+PORT    = int(os.environ.get("PORT", 8080))
 
-# ── Build PTB Application ─────────────────────────────
-ptb_app = Application.builder().token(TOKEN).build()
+ptb = Application.builder().token(TOKEN).build()
 
-# ── aiohttp Web Server Setup ──────────────────────────
-web_app = web.Application()
-
-# ── Webhook Registration Function ─────────────────────
-def set_webhook():
-    """Register webhook with Telegram API - with retry logic and verification"""
-    if not TOKEN:
-        logger.error("❌ BOT_TOKEN not found in environment variables")
-        return False
-    
-    if not RENDER_EXTERNAL_URL:
-        logger.error("❌ RENDER_EXTERNAL_URL not found in environment variables")
-        return False
-    
-    # Construct webhook URL
-    webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
-    logger.info(f"📡 Setting webhook URL: {webhook_url}")
-    
-    # Telegram API endpoint for setting webhook
-    api_url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
-    
-    # Retry logic with exponential backoff
-    max_retries = 3
-    retry_delay = 5  # Start with 5 seconds
-    
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"📡 Attempting webhook registration (attempt {attempt + 1}/{max_retries})")
-            
-            response = requests.post(api_url, json={
-                "url": webhook_url,
-                "allowed_updates": ["message", "callback_query", "inline_query"]
-            })
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("ok"):
-                    logger.info("✅ Webhook registered successfully!")
-                    # Verify webhook was actually set
-                    if verify_webhook():
-                        return True
-                    else:
-                        logger.warning("⚠️ Webhook registration response OK but verification failed")
-                        if attempt < max_retries - 1:
-                            logger.info(f"⏳ Waiting {retry_delay} seconds before retry...")
-                            time.sleep(retry_delay)
-                            retry_delay *= 2
-                        else:
-                            return False
-                else:
-                    error_msg = result.get('description', 'Unknown error')
-                    logger.error(f"❌ Webhook registration failed: {error_msg}")
-                    
-                    # Don't retry on certain errors
-                    if "bad webhook" in error_msg.lower() or "invalid" in error_msg.lower():
-                        logger.error("❌ Webhook URL appears invalid, not retrying")
-                        return False
-                    
-                    if attempt < max_retries - 1:
-                        logger.info(f"⏳ Waiting {retry_delay} seconds before retry...")
-                        time.sleep(retry_delay)
-                        retry_delay *= 2  # Exponential backoff
-                    else:
-                        logger.error("❌ Max retries reached, webhook registration failed")
-                        return False
-            else:
-                logger.error(f"❌ Webhook registration failed with status {response.status_code}")
-                if attempt < max_retries - 1:
-                    logger.info(f"⏳ Waiting {retry_delay} seconds before retry...")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                else:
-                    logger.error("❌ Max retries reached, webhook registration failed")
-                    return False
-                    
-        except Exception as e:
-            logger.error(f"❌ Error setting webhook (attempt {attempt + 1}): {e}")
-            if attempt < max_retries - 1:
-                logger.info(f"⏳ Waiting {retry_delay} seconds before retry...")
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-            else:
-                logger.error("❌ Max retries reached, webhook registration failed")
-                return False
-    
-    return False
-
-def verify_webhook():
-    """Verify that webhook is properly set by checking Telegram API"""
-    try:
-        api_url = f"https://api.telegram.org/bot{TOKEN}/getWebhookInfo"
-        response = requests.get(api_url)
-        
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("ok"):
-                webhook_info = result.get("result", {})
-                webhook_url = webhook_info.get("url", "")
-                expected_url = f"{RENDER_EXTERNAL_URL}/webhook"
-                
-                if webhook_url == expected_url:
-                    logger.info("✅ Webhook verification successful!")
-                    return True
-                else:
-                    logger.warning(f"⚠️ Webhook URL mismatch. Expected: {expected_url}, Got: {webhook_url}")
-                    return False
-            else:
-                logger.error(f"❌ getWebhookInfo failed: {result.get('description')}")
-                return False
-        else:
-            logger.error(f"❌ getWebhookInfo failed with status {response.status_code}")
-            return False
-    except Exception as e:
-        logger.error(f"❌ Error verifying webhook: {e}")
-        return False
-
-def check_and_set_webhook():
-    """Check if webhook is set and set it if not"""
-    try:
-        # First check if webhook is already set correctly
-        if verify_webhook():
-            logger.info("✅ Webhook already properly configured")
-            return True
-        
-        logger.info("📡 Webhook not set or incorrect, attempting to set...")
-        return set_webhook()
-    except Exception as e:
-        logger.error(f"❌ Error in check_and_set_webhook: {e}")
-        return False
-
-# ── Command Handlers ──────────────────────────────────
 async def start(update, context):
-    try:
-        await update.message.reply_text(
-            "👋 Welcome to Forex Signal Bot!\n\n"
-            "I monitor 7 forex pairs 24/5 and alert you\n"
-            "when a high-probability trade setup is found.\n\n"
-            "📌 Monitored Pairs:\n"
-            "USDJPY | EURUSD | GBPUSD | XAUUSD\n"
-            "USDCAD | EURJPY | GBPJPY\n\n"
-            "Use /help to see all commands."
-        )
-        logger.info(f"User {update.effective_user.username} started the bot")
-    except Exception as e:
-        logger.error(f"Error in start command: {e}")
+    await update.message.reply_text(
+        "👋 Welcome to Forex Signal Bot!\n\n"
+        "I monitor 7 forex pairs 24/5.\n\n"
+        "📌 Pairs: USDJPY | EURUSD | GBPUSD\n"
+        "XAUUSD | USDCAD | EURJPY | GBPJPY\n\n"
+        "Use /help to see all commands."
+    )
 
 async def help_command(update, context):
-    try:
-        await update.message.reply_text(
-            "📖 Available Commands:\n\n"
-            "/start — Welcome message\n"
-            "/pairs — List monitored pairs\n"
-            "/signal EURUSD — Get signal for one pair\n"
-            "/signalall — Scan all 7 pairs now\n"
-            "/status — Bot status\n"
-            "/debug EURUSD — Test data fetch\n"
-            "/help — Show this message"
-        )
-    except Exception as e:
-        logger.error(f"Error in help command: {e}")
+    await update.message.reply_text(
+        "📖 Commands:\n\n"
+        "/start     — Welcome message\n"
+        "/pairs     — List monitored pairs\n"
+        "/signal EURUSD — Get signal\n"
+        "/signalall — Scan all 7 pairs\n"
+        "/status    — Bot status\n"
+        "/debug EURUSD  — Test data fetch\n"
+        "/help      — This message"
+    )
 
 async def pairs_command(update, context):
-    try:
-        await update.message.reply_text(
-            "📊 Monitored Forex Pairs:\n\n"
-            "1. USDJPY — US Dollar / Japanese Yen\n"
-            "2. EURUSD — Euro / US Dollar\n"
-            "3. GBPUSD — British Pound / US Dollar\n"
-            "4. XAUUSD — Gold / US Dollar\n"
-            "5. USDCAD — US Dollar / Canadian Dollar\n"
-            "6. EURJPY — Euro / Japanese Yen\n"
-            "7. GBPJPY — British Pound / Japanese Yen\n\n"
-            "Use /signal EURUSD to check a specific pair."
-        )
-    except Exception as e:
-        logger.error(f"Error in pairs command: {e}")
+    await update.message.reply_text(
+        "📊 Monitored Pairs:\n\n"
+        "1. USDJPY\n2. EURUSD\n3. GBPUSD\n"
+        "4. XAUUSD\n5. USDCAD\n6. EURJPY\n7. GBPJPY\n\n"
+        "Use /signal EURUSD to check a pair."
+    )
 
 async def signal_command(update, context):
+    from strategy import get_signal, is_market_open
+
+    if not context.args:
+        await update.message.reply_text(
+            "Example: /signal EURUSD"
+        )
+        return
+
+    pair = context.args[0].upper()
+    valid = ["USDJPY","EURUSD","GBPUSD","XAUUSD",
+             "USDCAD","EURJPY","GBPJPY"]
+
+    if pair not in valid:
+        await update.message.reply_text(
+            f"❌ Invalid pair: {pair}\n\n"
+            "Valid:\n" + "\n".join(valid)
+        )
+        return
+
+    if not is_market_open():
+        await update.message.reply_text(
+            "🔴 Market Closed on weekends.\n"
+            "⏰ Opens Monday 00:00 UTC"
+        )
+        return
+
+    await update.message.reply_text(f"🔍 Analyzing {pair}...")
+
     try:
-        from strategy import get_signal, is_market_open
-
-        if not context.args:
-            await update.message.reply_text(
-                "Please specify a pair.\nExample: /signal EURUSD"
-            )
-            return
-
-        pair = context.args[0].upper()
-        valid_pairs = ["USDJPY","EURUSD","GBPUSD","XAUUSD",
-                       "USDCAD","EURJPY","GBPJPY"]
-
-        if pair not in valid_pairs:
-            await update.message.reply_text(
-                f"❌ Invalid pair: {pair}\n\n"
-                f"Valid pairs:\n" + "\n".join(valid_pairs)
-            )
-            return
-
-        if not is_market_open():
-            await update.message.reply_text(
-                "🔴 Market Closed\n\n"
-                "Forex market is closed on weekends.\n"
-                "⏰ Opens Monday 00:00 UTC"
-            )
-            return
-
-        await update.message.reply_text(f"🔍 Analyzing {pair}...")
-
         signal = get_signal(pair)
 
         if signal.get("error"):
             await update.message.reply_text(
-                f"⚠️ Could not get signal for {pair}\n\n"
-                f"Reason: {signal['message']}\n\n"
-                f"Try /debug {pair} to check data feed."
+                f"⚠️ {signal['message']}\n"
+                f"Try /debug {pair}"
             )
             return
 
-        direction_emoji = "📈" if signal["direction"] == "BUY" else "📉"
-        color = "🟢" if signal["direction"] == "BUY" else "🔴"
-        strength_emoji = {
-            "STRONG": "✅",
-            "MODERATE": "⚠️",
-            "WEAK": "❌"
-        }.get(signal["strength"], "⚠️")
-
-        weak_warning = ""
-        if signal["strength"] == "WEAK":
-            weak_warning = (
-                "\n⚠️ WEAK SIGNAL — Market is ranging.\n"
-                "Consider waiting for a stronger setup.\n"
-            )
+        d = "📈" if signal["direction"] == "BUY" else "📉"
+        c = "🟢" if signal["direction"] == "BUY" else "🔴"
+        s = {"STRONG":"✅","MODERATE":"⚠️","WEAK":"❌"}.get(
+            signal["strength"],"⚠️")
 
         msg = (
-            f"📊 FOREX SIGNAL — {pair}\n\n"
-            f"{direction_emoji} Direction: {signal['direction']} {color}\n"
-            f"💪 Strength: {signal['strength']} {strength_emoji} "
-            f"(Score: {signal['score']}/100)\n"
-            f"{weak_warning}\n"
+            f"📊 SIGNAL — {pair}\n\n"
+            f"{d} Direction: {signal['direction']} {c}\n"
+            f"💪 Strength: {signal['strength']} {s} "
+            f"(Score: {signal['score']}/100)\n\n"
             f"💰 Entry:       {signal['entry']}\n"
-            f"🛑 Stop Loss:   {signal['stop_loss']}  "
+            f"🛑 Stop Loss:   {signal['stop_loss']} "
             f"(-{signal['sl_pips']:.1f} pips)\n"
-            f"🎯 Take Profit: {signal['take_profit']}  "
+            f"🎯 Take Profit: {signal['take_profit']} "
             f"(+{signal['tp_pips']:.1f} pips)\n"
-            f"⚖️ Risk/Reward: {signal['rr_ratio']}\n\n"
-            f"📉 RSI (14):    {signal['rsi']:.1f}\n"
-            f"📊 H1 Trend:    {signal['h1_trend']}\n"
-            f"📈 MACD:        {signal['macd_signal']}\n\n"
-            f"⚠️ Risk Warning:\n"
-            f"- Only risk 1-2% per trade\n"
-            f"- Move SL to breakeven at +1x ATR profit\n"
-            f"- WEAK signals = skip or small size\n\n"
-            f"⏱️ Generated: {signal['timestamp']}"
+            f"⚖️ RR: {signal['rr_ratio']}\n\n"
+            f"📉 RSI: {signal['rsi']:.1f}\n"
+            f"📊 H1 Trend: {signal['h1_trend']}\n"
+            f"📈 MACD: {signal['macd_signal']}\n\n"
+            f"⚠️ Risk 1-2% per trade only\n"
+            f"⏱️ {signal['timestamp']}"
         )
         await update.message.reply_text(msg)
+
     except Exception as e:
-        logger.exception(f"signal_command error: {e}")
-        await update.message.reply_text(
-            f"❌ Unexpected error: {str(e)}\n\n"
-            f"Try /debug {pair} to diagnose."
-        )
+        logger.exception(f"signal error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def signalall_command(update, context):
-    try:
-        from strategy import get_signal, is_market_open
+    from strategy import get_signal, is_market_open
 
-        if not is_market_open():
-            await update.message.reply_text(
-                "🔴 Market Closed on weekends.\n"
-                "⏰ Opens Monday 00:00 UTC"
-            )
-            return
-
-        await update.message.reply_text("🔍 Scanning all 7 pairs...")
-
-        pairs = ["USDJPY","EURUSD","GBPUSD","XAUUSD",
-                 "USDCAD","EURJPY","GBPJPY"]
-
-        lines = ["📊 FULL MARKET SCAN\n"]
-        for pair in pairs:
-            signal = get_signal(pair)
-            if signal.get("error"):
-                lines.append(f"{pair}  ⚠️ No data")
-            else:
-                d = "📈" if signal["direction"] == "BUY" else "📉"
-                s = {"STRONG":"✅","MODERATE":"⚠️","WEAK":"❌"}.get(
-                    signal["strength"], "⚠️")
-                lines.append(
-                    f"{pair}  {d} {signal['direction']}  "
-                    f"{signal['strength']} {s}"
-                )
-
-        lines.append("\n✅ STRONG = High confidence")
-        lines.append("⚠️ MODERATE = Manage risk")
-        lines.append("❌ WEAK = Avoid")
-        lines.append("\nUse /signal EURUSD for full details.")
-        lines.append(
-            f"⏱️ Scanned: "
-            f"{datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+    if not is_market_open():
+        await update.message.reply_text(
+            "🔴 Market Closed on weekends.\n"
+            "⏰ Opens Monday 00:00 UTC"
         )
+        return
 
-        await update.message.reply_text("\n".join(lines))
-    except Exception as e:
-        logger.error(f"Error in signalall command: {e}")
-        await update.message.reply_text("❌ Error scanning pairs. Please try again later.")
+    await update.message.reply_text("🔍 Scanning all pairs...")
+    pairs = ["USDJPY","EURUSD","GBPUSD","XAUUSD",
+             "USDCAD","EURJPY","GBPJPY"]
+    lines = ["📊 MARKET SCAN\n"]
+
+    for pair in pairs:
+        try:
+            sig = get_signal(pair)
+            if sig.get("error"):
+                lines.append(f"{pair} ⚠️ No data")
+            else:
+                d = "📈" if sig["direction"] == "BUY" else "📉"
+                s = {"STRONG":"✅","MODERATE":"⚠️","WEAK":"❌"}.get(
+                    sig["strength"],"⚠️")
+                lines.append(f"{pair} {d} {sig['direction']} {sig['strength']} {s}")
+        except:
+            lines.append(f"{pair} ❌ Error")
+
+    lines.append("\n✅STRONG=Trade ⚠️MODERATE=Careful ❌WEAK=Skip")
+    lines.append(f"⏱️ {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
+    await update.message.reply_text("\n".join(lines))
 
 async def status_command(update, context):
-    try:
-        await update.message.reply_text(
-            f"✅ Bot Status: Online\n"
-            f"📡 Mode: Webhook (Auto-registered)\n"
-            f"📈 Pairs Monitored: 7\n"
-            f"🔧 Last Check: {time.strftime('%H:%M:%S UTC', time.gmtime())}"
-        )
-    except Exception as e:
-        logger.error(f"Error in status command: {e}")
+    await update.message.reply_text(
+        f"✅ Online\n"
+        f"📡 Webhook: Active\n"
+        f"📈 Pairs: 7\n"
+        f"⏱️ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+    )
 
 async def debug_command(update, context):
+    from data_fetcher import get_m5_candles, get_h1_candles
+    pair = context.args[0].upper() if context.args else "EURUSD"
+    await update.message.reply_text(f"🔧 Testing {pair}...")
     try:
-        from data_fetcher import get_m5_candles, get_h1_candles
-        pair = context.args[0].upper() if context.args else "EURUSD"
-        await update.message.reply_text(f"🔧 Testing {pair}...")
         m5 = get_m5_candles(pair)
         h1 = get_h1_candles(pair)
         if m5 is not None and not m5.empty:
             await update.message.reply_text(
                 f"✅ Data OK!\n"
-                f"M5 candles: {len(m5)}\n"
-                f"H1 candles: {len(h1) if h1 is not None else 0}\n"
-                f"Latest close: {m5.iloc[-1]['close']:.5f}\n"
-                f"Latest time: {m5.index[-1]}"
+                f"M5: {len(m5)} candles\n"
+                f"H1: {len(h1) if h1 is not None else 0} candles\n"
+                f"Close: {float(m5.iloc[-1]['close']):.5f}\n"
+                f"Time: {m5.index[-1]}\n"
+                f"Cols: {list(m5.columns)}"
             )
         else:
             await update.message.reply_text(
-                f"❌ Data fetch FAILED for {pair}\n"
-                "Market may be closed or API issue."
+                f"❌ No data for {pair}\n"
+                "Market may be closed."
             )
     except Exception as e:
-        logger.error(f"Error in debug command: {e}")
-        await update.message.reply_text("❌ Error running debug. Please try again later.")
-
-async def setwebhook_command(update, context):
-    """Manually set the webhook"""
-    try:
-        if check_and_set_webhook():
-            await update.message.reply_text(
-                "✅ Webhook set successfully!\n\n"
-                "The bot is now ready to receive messages.\n"
-                "Use /status to check webhook status."
-            )
-        else:
-            await update.message.reply_text(
-                "❌ Failed to set webhook.\n\n"
-                "Please check:\n"
-                "1. RENDER_EXTERNAL_URL environment variable\n"
-                "2. Bot token is correct\n"
-                "3. Try again in a few minutes"
-            )
-    except Exception as e:
-        logger.error(f"Error in setwebhook command: {e}")
-        await update.message.reply_text("❌ Error setting webhook. Please try again later.")
-
-async def echo(update, context):
-    """Test echo handler to verify messages are being received and processed"""
-    logger.info(f"Echo handler triggered: {update.message.text}")
-    await update.message.reply_text(
-        f"✅ Bot received: {update.message.text}"
-    )
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def unknown(update, context):
-    try:
-        await update.message.reply_text(
-            "❓ Unknown command.\nUse /help to see available commands."
-        )
-    except Exception as e:
-        logger.error(f"Error in unknown command: {e}")
+    await update.message.reply_text(
+        "❓ Unknown command. Use /help"
+    )
 
-# ── Register Handlers ─────────────────────────────────
-ptb_app.add_handler(CommandHandler("start", start))
-ptb_app.add_handler(CommandHandler("help", help_command))
-ptb_app.add_handler(CommandHandler("pairs", pairs_command))
-ptb_app.add_handler(CommandHandler("signal", signal_command))
-ptb_app.add_handler(CommandHandler("signalall", signalall_command))
-ptb_app.add_handler(CommandHandler("status", status_command))
-ptb_app.add_handler(CommandHandler("debug", debug_command))
-ptb_app.add_handler(MessageHandler(filters.TEXT, echo))
-ptb_app.add_handler(MessageHandler(filters.COMMAND, unknown))
+ptb.add_handler(CommandHandler("start",     start))
+ptb.add_handler(CommandHandler("help",      help_command))
+ptb.add_handler(CommandHandler("pairs",     pairs_command))
+ptb.add_handler(CommandHandler("signal",    signal_command))
+ptb.add_handler(CommandHandler("signalall", signalall_command))
+ptb.add_handler(CommandHandler("status",    status_command))
+ptb.add_handler(CommandHandler("debug",     debug_command))
+ptb.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-# ── aiohttp Endpoints ─────────────────────────────────
-async def home(request):
-    """Health check endpoint - keeps Render service alive and provides UptimeRobot target"""
-    return web.json_response({
-        "status": "healthy",
-        "message": "Forex Signal Bot is running",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "webhook_verified": verify_webhook()
-    })
-
-async def health_check(request):
-    """Alternative health check endpoint"""
-    return web.json_response({
-        "status": "ok",
-        "service": "forex-signal-bot",
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    })
-
-async def webhook_status(request):
-    """Check webhook status"""
-    try:
-        is_set = verify_webhook()
-        return web.json_response({
-            "webhook_set": is_set,
-            "expected_url": f"{RENDER_EXTERNAL_URL}/webhook" if RENDER_EXTERNAL_URL else None,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-    except Exception as e:
-        return web.json_response({
-            "error": str(e),
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }, status=500)
+async def health(request):
+    return web.Response(text="Bot is running")
 
 async def webhook_handler(request):
-    """Webhook endpoint to receive updates from Telegram"""
     try:
-        # Get JSON data from Telegram
         data = await request.json()
-        
-        if not data:
-            logger.warning("⚠️ Received empty webhook data")
-            return web.json_response({"error": "No data received"}, status=400)
-        
-        logger.info(f"📨 Incoming update: {data}")
-        
-        # Create Update object from JSON
-        update = Update.de_json(data, ptb_app.bot)
-        logger.info(f"✅ Update parsed: update_id={update.update_id}")
-        
-        if update.message:
-            logger.info(f"💬 Message: {update.message.text} "
-                       f"from {update.message.from_user.username}")
-        
-        # Process the update through the bot application
-        await ptb_app.process_update(update)
-        logger.info(f"✅ Update processed successfully")
-        
-        return web.json_response({"status": "ok"})
-        
+        logger.info(f"Update received: {data}")
+        update = Update.de_json(data, ptb.bot)
+        await ptb.process_update(update)
+        logger.info("Update processed OK")
     except Exception as e:
-        logger.exception(f"❌ Webhook handler error: {e}")
-        return web.json_response({"error": str(e)}, status=500)
+        logger.exception(f"Webhook error: {e}")
+    return web.Response(text="ok")
 
-# ── Keep-Alive Mechanism ──────────────────────────────
-def start_keep_alive():
-    """Start a background thread to ping the health endpoint and keep Render awake"""
-    import threading
-    
-    def keep_alive_worker():
-        """Background worker that pings the health endpoint every 10 minutes"""
-        while True:
-            try:
-                # Ping our own health endpoint to keep Render service awake
-                response = requests.get(f"http://localhost:{PORT}/health", timeout=10)
-                if response.status_code == 200:
-                    logger.info("✅ Keep-alive ping successful")
-                else:
-                    logger.warning(f"⚠️ Keep-alive ping returned status {response.status_code}")
-            except Exception as e:
-                logger.error(f"❌ Keep-alive ping failed: {e}")
-            
-            # Wait 10 minutes before next ping (Render spins down after 15 minutes)
-            time.sleep(600)  # 10 minutes
-    
-    # Start keep-alive thread
-    keep_alive_thread = threading.Thread(target=keep_alive_worker, daemon=True)
-    keep_alive_thread.start()
-    logger.info("🔄 Keep-alive mechanism started (pings every 10 minutes)")
-
-# ── Webhook Mode Setup ────────────────────────────────
 async def on_startup(app):
-    """Initialize PTB when aiohttp app starts"""
-    logger.info("Initializing PTB...")
-    await ptb_app.initialize()
-    logger.info("Starting PTB...")
-    await ptb_app.start()
-    logger.info("✅ PTB fully started and ready")
-    logger.info(f"Registered handlers: {len(ptb_app.handlers)} handler groups")
+    await ptb.initialize()
+    await ptb.start()
+    logger.info("✅ PTB started and ready")
 
 async def on_shutdown(app):
-    """Shutdown PTB when aiohttp app stops"""
-    logger.info("Shutting down PTB...")
-    await ptb_app.stop()
-    logger.info("✅ PTB stopped")
+    await ptb.stop()
+    await ptb.shutdown()
 
-async def main():
-    """Start the bot with webhook mode on Render."""
-    try:
-        logger.info("🤖 Starting Forex Signal Bot with webhook mode...")
-        
-        # Verify bot token is loading correctly
-        token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        app_url = os.environ.get("RENDER_EXTERNAL_URL")
-        logger.info(f"Token loaded: {'✅ Yes' if token else '❌ MISSING'}")
-        logger.info(f"Token prefix: {token[:10] if token else 'N/A'}...")
-        logger.info(f"RENDER_EXTERNAL_URL: {app_url}")
-        
-        # Add routes to aiohttp app
-        web_app.router.add_get("/", home)
-        web_app.router.add_get("/health", health_check)
-        web_app.router.add_get("/webhook-status", webhook_status)
-        web_app.router.add_post("/webhook", webhook_handler)
-        
-        # Add startup and shutdown handlers
-        web_app.on_startup.append(on_startup)
-        web_app.on_shutdown.append(on_shutdown)
-        
-        # Start keep-alive mechanism to prevent Render spin-down
-        start_keep_alive()
-        
-        # Start the application
-        logger.info("✅ Bot started successfully. Webhook must be set manually.")
-        
-        # Start aiohttp server
-        logger.info(f"🌐 Starting aiohttp server on 0.0.0.0:{PORT}")
-        web.run_app(web_app, host="0.0.0.0", port=PORT)
-        
-    except Exception as e:
-        logger.error(f"❌ Error starting bot: {e}")
-        raise
+def main():
+    app = web.Application()
+    app.router.add_get("/",         health)
+    app.router.add_get("/health",   health)
+    app.router.add_post("/webhook", webhook_handler)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    logger.info(f"Starting on port {PORT}")
+    web.run_app(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    import asyncio
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped by user")
-    except Exception as e:
-        logger.error(f"❌ Bot crashed: {e}")
+    main()
