@@ -395,6 +395,13 @@ async def setwebhook_command(update, context):
         logger.error(f"Error in setwebhook command: {e}")
         await update.message.reply_text("❌ Error setting webhook. Please try again later.")
 
+async def echo(update, context):
+    """Test echo handler to verify messages are being received and processed"""
+    logger.info(f"Echo handler triggered: {update.message.text}")
+    await update.message.reply_text(
+        f"✅ Bot received: {update.message.text}"
+    )
+
 async def unknown(update, context):
     try:
         await update.message.reply_text(
@@ -411,6 +418,7 @@ ptb_app.add_handler(CommandHandler("signal", signal_command))
 ptb_app.add_handler(CommandHandler("signalall", signalall_command))
 ptb_app.add_handler(CommandHandler("status", status_command))
 ptb_app.add_handler(CommandHandler("debug", debug_command))
+ptb_app.add_handler(MessageHandler(filters.TEXT, echo))
 ptb_app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
 # ── Flask Endpoints ───────────────────────────────────
@@ -450,7 +458,7 @@ def webhook_status():
         }), 500
 
 @app.route("/webhook", methods=["POST"])
-def webhook():
+async def webhook():
     """Webhook endpoint to receive updates from Telegram"""
     try:
         # Get JSON data from Telegram
@@ -460,17 +468,24 @@ def webhook():
             logger.warning("⚠️ Received empty webhook data")
             return jsonify({"error": "No data received"}), 400
         
+        logger.info(f"📨 Incoming update: {json_data}")
+        
         # Create Update object from JSON
         update = Update.de_json(json_data, ptb_app.bot)
+        logger.info(f"✅ Update parsed: update_id={update.update_id}")
+        
+        if update.message:
+            logger.info(f"💬 Message: {update.message.text} "
+                       f"from {update.message.from_user.username}")
         
         # Process the update through the bot application
         ptb_app.process_update(update)
+        logger.info(f"✅ Update processed successfully")
         
-        logger.info(f"✅ Processed update: {update.update_id}")
         return jsonify({"status": "ok"}), 200
         
     except Exception as e:
-        logger.error(f"❌ Error processing webhook: {e}")
+        logger.exception(f"❌ Webhook handler error: {e}")
         return jsonify({"error": str(e)}), 500
 
 # ── Keep-Alive Mechanism ──────────────────────────────
@@ -505,14 +520,25 @@ async def main():
     try:
         logger.info("🤖 Starting Forex Signal Bot with webhook mode...")
         
+        # Verify bot token is loading correctly
+        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        app_url = os.environ.get("RENDER_EXTERNAL_URL")
+        logger.info(f"Token loaded: {'✅ Yes' if token else '❌ MISSING'}")
+        logger.info(f"Token prefix: {token[:10] if token else 'N/A'}...")
+        logger.info(f"RENDER_EXTERNAL_URL: {app_url}")
+        
         # Initialize the application
+        logger.info("Initializing PTB...")
         await ptb_app.initialize()
+        logger.info("Starting PTB...")
+        await ptb_app.start()
+        logger.info("✅ PTB fully started and ready")
+        logger.info(f"Registered handlers: {len(ptb_app.handlers)} handler groups")
         
         # Start keep-alive mechanism to prevent Render spin-down
         start_keep_alive()
         
         # Start the application
-        await ptb_app.start()
         logger.info("✅ Bot started successfully. Webhook must be set manually.")
         
         # Start Flask server
