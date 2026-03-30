@@ -1,9 +1,10 @@
 import os
+import asyncio
 import logging
 import time
 import requests
 from datetime import datetime, timezone
-from flask import Flask, request, jsonify
+from aiohttp import web
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -33,8 +34,8 @@ RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 # ── Build PTB Application ─────────────────────────────
 ptb_app = Application.builder().token(TOKEN).build()
 
-# ── Flask Web Server Setup ────────────────────────────
-app = Flask(__name__)
+# ── aiohttp Web Server Setup ──────────────────────────
+web_app = web.Application()
 
 # ── Webhook Registration Function ─────────────────────
 def set_webhook():
@@ -421,57 +422,53 @@ ptb_app.add_handler(CommandHandler("debug", debug_command))
 ptb_app.add_handler(MessageHandler(filters.TEXT, echo))
 ptb_app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-# ── Flask Endpoints ───────────────────────────────────
-@app.route("/")
-def home():
+# ── aiohttp Endpoints ─────────────────────────────────
+async def home(request):
     """Health check endpoint - keeps Render service alive and provides UptimeRobot target"""
-    return jsonify({
+    return web.json_response({
         "status": "healthy",
         "message": "Forex Signal Bot is running",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "webhook_verified": verify_webhook()
-    }), 200
+    })
 
-@app.route("/health")
-def health_check():
+async def health_check(request):
     """Alternative health check endpoint"""
-    return jsonify({
+    return web.json_response({
         "status": "ok",
         "service": "forex-signal-bot",
         "timestamp": datetime.now(timezone.utc).isoformat()
-    }), 200
+    })
 
-@app.route("/webhook-status")
-def webhook_status():
+async def webhook_status(request):
     """Check webhook status"""
     try:
         is_set = verify_webhook()
-        return jsonify({
+        return web.json_response({
             "webhook_set": is_set,
             "expected_url": f"{RENDER_EXTERNAL_URL}/webhook" if RENDER_EXTERNAL_URL else None,
             "timestamp": datetime.now(timezone.utc).isoformat()
-        }), 200
+        })
     except Exception as e:
-        return jsonify({
+        return web.json_response({
             "error": str(e),
             "timestamp": datetime.now(timezone.utc).isoformat()
-        }), 500
+        }, status=500)
 
-@app.route("/webhook", methods=["POST"])
-async def webhook():
+async def webhook_handler(request):
     """Webhook endpoint to receive updates from Telegram"""
     try:
         # Get JSON data from Telegram
-        json_data = request.get_json()
+        data = await request.json()
         
-        if not json_data:
+        if not data:
             logger.warning("⚠️ Received empty webhook data")
-            return jsonify({"error": "No data received"}), 400
+            return web.json_response({"error": "No data received"}, status=400)
         
-        logger.info(f"📨 Incoming update: {json_data}")
+        logger.info(f"📨 Incoming update: {data}")
         
         # Create Update object from JSON
-        update = Update.de_json(json_data, ptb_app.bot)
+        update = Update.de_json(data, ptb_app.bot)
         logger.info(f"✅ Update parsed: update_id={update.update_id}")
         
         if update.message:
@@ -479,14 +476,14 @@ async def webhook():
                        f"from {update.message.from_user.username}")
         
         # Process the update through the bot application
-        ptb_app.process_update(update)
+        await ptb_app.process_update(update)
         logger.info(f"✅ Update processed successfully")
         
-        return jsonify({"status": "ok"}), 200
+        return web.json_response({"status": "ok"})
         
     except Exception as e:
         logger.exception(f"❌ Webhook handler error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return web.json_response({"error": str(e)}, status=500)
 
 # ── Keep-Alive Mechanism ──────────────────────────────
 def start_keep_alive():
@@ -515,6 +512,21 @@ def start_keep_alive():
     logger.info("🔄 Keep-alive mechanism started (pings every 10 minutes)")
 
 # ── Webhook Mode Setup ────────────────────────────────
+async def on_startup(app):
+    """Initialize PTB when aiohttp app starts"""
+    logger.info("Initializing PTB...")
+    await ptb_app.initialize()
+    logger.info("Starting PTB...")
+    await ptb_app.start()
+    logger.info("✅ PTB fully started and ready")
+    logger.info(f"Registered handlers: {len(ptb_app.handlers)} handler groups")
+
+async def on_shutdown(app):
+    """Shutdown PTB when aiohttp app stops"""
+    logger.info("Shutting down PTB...")
+    await ptb_app.stop()
+    logger.info("✅ PTB stopped")
+
 async def main():
     """Start the bot with webhook mode on Render."""
     try:
@@ -527,13 +539,15 @@ async def main():
         logger.info(f"Token prefix: {token[:10] if token else 'N/A'}...")
         logger.info(f"RENDER_EXTERNAL_URL: {app_url}")
         
-        # Initialize the application
-        logger.info("Initializing PTB...")
-        await ptb_app.initialize()
-        logger.info("Starting PTB...")
-        await ptb_app.start()
-        logger.info("✅ PTB fully started and ready")
-        logger.info(f"Registered handlers: {len(ptb_app.handlers)} handler groups")
+        # Add routes to aiohttp app
+        web_app.router.add_get("/", home)
+        web_app.router.add_get("/health", health_check)
+        web_app.router.add_get("/webhook-status", webhook_status)
+        web_app.router.add_post("/webhook", webhook_handler)
+        
+        # Add startup and shutdown handlers
+        web_app.on_startup.append(on_startup)
+        web_app.on_shutdown.append(on_shutdown)
         
         # Start keep-alive mechanism to prevent Render spin-down
         start_keep_alive()
@@ -541,9 +555,9 @@ async def main():
         # Start the application
         logger.info("✅ Bot started successfully. Webhook must be set manually.")
         
-        # Start Flask server
-        logger.info(f"🌐 Starting Flask server on 0.0.0.0:{PORT}")
-        app.run(host="0.0.0.0", port=PORT, debug=False)
+        # Start aiohttp server
+        logger.info(f"🌐 Starting aiohttp server on 0.0.0.0:{PORT}")
+        web.run_app(web_app, host="0.0.0.0", port=PORT)
         
     except Exception as e:
         logger.error(f"❌ Error starting bot: {e}")
