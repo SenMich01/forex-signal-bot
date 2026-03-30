@@ -511,12 +511,9 @@ async def main():
         # Start keep-alive mechanism to prevent Render spin-down
         start_keep_alive()
         
-        # Note: Webhook setup is now manual - user must set it via /setwebhook command
-        logger.info("⚠️ Webhook setup is manual - use /setwebhook command to configure")
-        
         # Start the application
         await ptb_app.start()
-        logger.info("✅ Bot started successfully with webhook mode")
+        logger.info("✅ Bot started successfully. Webhook must be set manually.")
         
         # Start Flask server
         logger.info(f"🌐 Starting Flask server on 0.0.0.0:{PORT}")
