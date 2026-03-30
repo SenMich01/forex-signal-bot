@@ -117,11 +117,11 @@ def get_signal(pair):
         
         logger.info(f"M5 data: {type(m5)}, empty: {m5 is None or m5.empty if m5 is not None else 'None'}")
         
-        if m5 is None or m5.empty or len(m5) < 50:
+        if m5 is None or m5.empty or len(m5) < 20:
             logger.error(f"Not enough M5 data for {pair}: got {len(m5) if m5 is not None else 0} candles")
             return {"error": True, "message": f"Not enough market data for {pair}."}
 
-        if h1 is None or h1.empty or len(h1) < 21:
+        if h1 is None or h1.empty or len(h1) < 10:
             logger.error(f"Not enough H1 data for {pair}")
             return {"error": True, "message": f"Not enough H1 data for {pair}."}
 
