@@ -1,9 +1,10 @@
 """
 Trading strategy implementation for Forex Signal Bot.
 
-Completely rewritten with scoring system that ALWAYS returns a signal.
-Uses H1 trend analysis, M5 momentum indicators, and volatility-based
-risk management for reliable signals with above 50% win rate.
+New strategy focuses on:
+1. Following dominant trend (H4 bias)
+2. Finding optimal entry points (pullbacks, not breakouts)
+3. Checking psychological round number levels for confluence
 """
 
 import pandas as pd
@@ -61,50 +62,167 @@ def get_pip_size(pair: str) -> float:
     else:
         return 0.0001
 
-def calculate_ema(prices: pd.Series, period: int) -> pd.Series:
-    """Calculate Exponential Moving Average."""
-    return prices.ewm(span=period, adjust=False).mean()
+def get_h4_candles(pair):
+    """Fetch H4 data for dominant trend bias."""
+    df = get_candles(pair, "4h", "60d")
+    if df is None or len(df) < 20:
+        df = get_candles(pair, "4h", "30d")
+    return df
 
-def calculate_rsi(prices: pd.Series, period: int) -> pd.Series:
-    """Calculate Relative Strength Index."""
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+def get_candles(pair, interval, period):
+    """Fetch candles using data_fetcher."""
+    from data_fetcher import get_candles as fetch_candles
+    return fetch_candles(pair, interval, period)
+
+def get_market_structure(h1_df):
+    """Check market structure for higher highs/lows."""
+    # Get last 5 swing highs and lows
+    highs = h1_df["high"].rolling(5, center=True).max()
+    lows  = h1_df["low"].rolling(5, center=True).min()
     
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_atr(df: pd.DataFrame, period: int) -> pd.Series:
-    """Calculate Average True Range."""
-    high_low = df['high'] - df['low']
-    high_close = abs(df['high'] - df['close'].shift())
-    low_close = abs(df['low'] - df['close'].shift())
+    recent_highs = highs.dropna().tail(3).values
+    recent_lows  = lows.dropna().tail(3).values
     
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = true_range.rolling(window=period).mean()
-    return atr
+    # Bullish structure: each low higher than previous
+    bull_structure = (
+        len(recent_lows) >= 2 and 
+        recent_lows[-1] > recent_lows[-2]
+    )
+    
+    # Bearish structure: each high lower than previous
+    bear_structure = (
+        len(recent_highs) >= 2 and 
+        recent_highs[-1] < recent_highs[-2]
+    )
+    
+    return bull_structure, bear_structure
 
-def calculate_macd(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """Calculate MACD indicator."""
-    exp1 = df['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['close'].ewm(span=26, adjust=False).mean()
-    macd = exp1 - exp2
-    signal = macd.ewm(span=9, adjust=False).mean()
-    histogram = macd - signal
-    return macd, signal, histogram
+def check_round_numbers(price, atr, pair):
+    """
+    Check if price is near a round number level.
+    Returns: 
+      'NEAR_SUPPORT'    - price just above round number (bullish)
+      'NEAR_RESISTANCE' - price just below round number (bearish)
+      'NEUTRAL'         - not near round number
+    """
+    # Determine pip size
+    if "JPY" in pair:
+        round_intervals = [0.50, 1.0, 5.0, 10.0]
+        proximity = atr * 1.5
+    elif "XAU" in pair:
+        round_intervals = [5.0, 10.0, 25.0, 50.0, 100.0]
+        proximity = atr * 1.5
+    else:
+        round_intervals = [0.00500, 0.01000, 0.05000, 0.10000]
+        proximity = atr * 1.5
 
-def calculate_swing_high(prices: pd.Series, period: int) -> float:
-    """Calculate swing high over a period."""
-    return prices.rolling(window=period, center=True).max().iloc[-1]
+    for interval in round_intervals:
+        # Find nearest round number
+        nearest = round(price / interval) * interval
+        distance = abs(price - nearest)
+        
+        if distance <= proximity:
+            # Price is above round number = support below
+            if price >= nearest:
+                return 'NEAR_SUPPORT', nearest
+            # Price is below round number = resistance above
+            else:
+                return 'NEAR_RESISTANCE', nearest
+    
+    return 'NEUTRAL', None
 
-def calculate_swing_low(prices: pd.Series, period: int) -> float:
-    """Calculate swing low over a period."""
-    return prices.rolling(window=period, center=True).min().iloc[-1]
+def get_rsi_signal(rsi_series):
+    """Calculate RSI signal with zones."""
+    current = rsi_series.iloc[-1]
+    previous = rsi_series.iloc[-3]
+    
+    score = 0
+    
+    # Crossed above 40 = bullish momentum returning
+    if previous < 40 and current >= 40:
+        score += 15
+    # Crossed below 60 = bearish momentum returning    
+    elif previous > 60 and current <= 60:
+        score -= 15
+    # Good buy zone
+    elif 50 <= current <= 65:
+        score += 10
+    # Good sell zone
+    elif 35 <= current <= 50:
+        score -= 10
+    # Overbought - avoid buys
+    elif current > 70:
+        score -= 20
+    # Oversold - favor buys
+    elif current < 30:
+        score += 20
+        
+    return score, current
+
+def check_ema_pullback(m5_df):
+    """
+    Check for EMA pullback entries.
+    BUY pullback: price dipped to EMA21 then bounced back up
+    SELL pullback: price rallied to EMA21 then rejected back down
+    """
+    close  = m5_df["close"]
+    ema21  = m5_df["ema21"]
+    ema50  = m5_df["ema50"]
+    
+    # Check last 3 candles for pullback
+    recent_low  = m5_df["low"].iloc[-3:].min()
+    recent_high = m5_df["high"].iloc[-3:].max()
+    current     = close.iloc[-1]
+    atr         = m5_df["atr"].iloc[-1]
+    
+    # Bullish pullback: recent low touched EMA21 area, 
+    # now price back above EMA21
+    bull_pullback = (
+        recent_low <= ema21.iloc[-1] + atr * 0.3 and
+        current > ema21.iloc[-1] and
+        current > ema50.iloc[-1]
+    )
+    
+    # Bearish pullback: recent high touched EMA21 area,
+    # now price back below EMA21
+    bear_pullback = (
+        recent_high >= ema21.iloc[-1] - atr * 0.3 and
+        current < ema21.iloc[-1] and
+        current < ema50.iloc[-1]
+    )
+    
+    return bull_pullback, bear_pullback
+
+def get_macd_score(m5_df):
+    """Calculate MACD momentum score."""
+    macd     = m5_df["macd"]
+    signal   = m5_df["macd_signal"]
+    
+    current_macd   = macd.iloc[-1]
+    current_signal = signal.iloc[-1]
+    prev_macd      = macd.iloc[-2]
+    prev_signal    = signal.iloc[-2]
+    
+    score = 0
+    
+    # Fresh bullish crossover (most powerful)
+    if prev_macd <= prev_signal and current_macd > current_signal:
+        score += 20
+    # Fresh bearish crossover (most powerful)
+    elif prev_macd >= prev_signal and current_macd < current_signal:
+        score -= 20
+    # Already bullish
+    elif current_macd > current_signal:
+        score += 10
+    # Already bearish
+    elif current_macd < current_signal:
+        score -= 10
+        
+    return score
 
 def get_signal(pair):
     """
-    Generate a trading signal for a specific pair using scoring system.
+    Generate a trading signal for a specific pair using improved scoring system.
     
     This function ALWAYS returns a signal (never "no signal found").
     """
@@ -114,8 +232,7 @@ def get_signal(pair):
         # Fetch data
         m5 = get_m5_candles(pair)
         h1 = get_h1_candles(pair)
-        
-        logger.info(f"M5 data: {type(m5)}, empty: {m5 is None or m5.empty if m5 is not None else 'None'}")
+        h4 = get_h4_candles(pair)
         
         if m5 is None or m5.empty or len(m5) < 20:
             logger.error(f"Not enough M5 data for {pair}: got {len(m5) if m5 is not None else 0} candles")
@@ -125,13 +242,12 @@ def get_signal(pair):
             logger.error(f"Not enough H1 data for {pair}")
             return {"error": True, "message": f"Not enough H1 data for {pair}."}
 
-        # Make sure columns exist and are lowercase
-        m5.columns = [c.lower().strip() for c in m5.columns]
-        h1.columns = [c.lower().strip() for c in h1.columns]
+        # Clean columns
+        for df in [m5, h1]:
+            df.columns = [c.lower().strip() for c in df.columns]
+        if h4 is not None:
+            h4.columns = [c.lower().strip() for c in h4.columns]
         
-        logger.info(f"M5 columns: {list(m5.columns)}")
-        logger.info(f"M5 length: {len(m5)}")
-
         # Check required columns exist
         required = ["open", "high", "low", "close", "volume"]
         for col in required:
@@ -142,176 +258,193 @@ def get_signal(pair):
         # Drop NaN rows
         m5 = m5.dropna(subset=["close", "high", "low", "open"])
         h1 = h1.dropna(subset=["close"])
+        if h4 is not None:
+            h4 = h4.dropna(subset=["close"])
 
-        # ── Calculate Indicators ──────────────────────
-        
-        # EMA on M5
+        # Calculate M5 indicators
         m5["ema8"]  = m5["close"].ewm(span=8,  adjust=False).mean()
         m5["ema21"] = m5["close"].ewm(span=21, adjust=False).mean()
         m5["ema50"] = m5["close"].ewm(span=50, adjust=False).mean()
-
-        # RSI 14 on M5
-        delta = m5["close"].diff()
-        gain  = delta.clip(lower=0)
-        loss  = -delta.clip(upper=0)
+        
+        delta    = m5["close"].diff()
+        gain     = delta.clip(lower=0)
+        loss     = -delta.clip(upper=0)
         avg_gain = gain.ewm(span=14, adjust=False).mean()
         avg_loss = loss.ewm(span=14, adjust=False).mean()
-        rs = avg_gain / avg_loss.replace(0, 0.0001)
+        rs       = avg_gain / avg_loss.replace(0, 0.0001)
         m5["rsi"] = 100 - (100 / (1 + rs))
-
-        # MACD on M5
-        ema12 = m5["close"].ewm(span=12, adjust=False).mean()
-        ema26 = m5["close"].ewm(span=26, adjust=False).mean()
-        m5["macd"] = ema12 - ema26
-        m5["macd_signal"] = m5["macd"].ewm(span=9, adjust=False).mean()
-
-        # ATR on M5
-        high_low   = m5["high"] - m5["low"]
-        high_close = abs(m5["high"] - m5["close"].shift())
-        low_close  = abs(m5["low"]  - m5["close"].shift())
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        
+        ema12        = m5["close"].ewm(span=12, adjust=False).mean()
+        ema26        = m5["close"].ewm(span=26, adjust=False).mean()
+        m5["macd"]         = ema12 - ema26
+        m5["macd_signal"]  = m5["macd"].ewm(span=9, adjust=False).mean()
+        
+        hl  = m5["high"] - m5["low"]
+        hc  = abs(m5["high"] - m5["close"].shift())
+        lc  = abs(m5["low"]  - m5["close"].shift())
+        tr  = pd.concat([hl, hc, lc], axis=1).max(axis=1)
         m5["atr"] = tr.ewm(span=14, adjust=False).mean()
-
-        # EMA on H1
+        
+        # Calculate H1 indicators
         h1["ema21"] = h1["close"].ewm(span=21, adjust=False).mean()
         h1["ema50"] = h1["close"].ewm(span=50, adjust=False).mean()
-
-        # ── Get Latest Values ─────────────────────────
-        latest   = m5.iloc[-1]
-        h1_latest = h1.iloc[-1]
-
+        
+        # Calculate H4 indicators
+        h4_ema21_val = None
+        h4_ema50_val = None
+        h4_bias      = "NEUTRAL"
+        if h4 is not None and len(h4) >= 20:
+            h4["ema21"]  = h4["close"].ewm(span=21, adjust=False).mean()
+            h4["ema50"]  = h4["close"].ewm(span=50, adjust=False).mean()
+            h4_ema21_val = float(h4["ema21"].iloc[-1])
+            h4_ema50_val = float(h4["ema50"].iloc[-1])
+            h4_bias      = "BULL" if h4_ema21_val > h4_ema50_val else "BEAR"
+        
+        # Get latest values
+        latest        = m5.iloc[-1]
+        h1_latest     = h1.iloc[-1]
         current_close = float(latest["close"])
-        current_rsi   = float(latest["rsi"])
         current_atr   = float(latest["atr"])
-        m5_ema8       = float(latest["ema8"])
-        m5_ema21      = float(latest["ema21"])
-        m5_ema50      = float(latest["ema50"])
-        macd_val      = float(latest["macd"])
-        macd_sig      = float(latest["macd_signal"])
-        h1_ema21      = float(h1_latest["ema21"])
-        h1_ema50      = float(h1_latest["ema50"])
-
-        swing_low  = float(m5["low"].tail(20).min())
-        swing_high = float(m5["high"].tail(20).max())
-
-        logger.info(
-            f"{pair} — close={current_close:.5f} "
-            f"rsi={current_rsi:.1f} atr={current_atr:.5f} "
-            f"ema8={m5_ema8:.5f} ema21={m5_ema21:.5f} "
-            f"ema50={m5_ema50:.5f}"
-        )
-
-        # ── Scoring System ────────────────────────────
+        h1_ema21_val  = float(h1_latest["ema21"])
+        h1_ema50_val  = float(h1_latest["ema50"])
+        swing_low     = float(m5["low"].tail(20).min())
+        swing_high    = float(m5["high"].tail(20).max())
+        
+        # ── SCORING ──────────────────────────────────
         score = 0
-
-        # H1 trend
-        if h1_ema21 > h1_ema50:
-            score += 25
-        else:
-            score -= 25
-
-        # M5 EMA stack
-        if m5_ema8 > m5_ema21:
+        
+        # 1. H4 dominant trend (+/- 30)
+        if h4_bias == "BULL":
+            score += 30
+        elif h4_bias == "BEAR":
+            score -= 30
+        
+        # 2. H1 trend (+/- 20)
+        if h1_ema21_val > h1_ema50_val:
             score += 20
         else:
             score -= 20
-
-        if m5_ema21 > m5_ema50:
-            score += 15
-        else:
-            score -= 15
-
-        # RSI
-        if 50 < current_rsi < 70:
+        
+        # 3. Market structure (+/- 20)
+        bull_struct, bear_struct = get_market_structure(h1)
+        if bull_struct:
             score += 20
-        elif 30 < current_rsi < 50:
+        elif bear_struct:
             score -= 20
-
-        # MACD
-        if macd_val > macd_sig:
+        
+        # 4. EMA pullback entry (+/- 20)
+        bull_pb, bear_pb = check_ema_pullback(m5)
+        if bull_pb:
             score += 20
-        else:
+        elif bear_pb:
             score -= 20
-
-        # ── Direction and Strength ────────────────────
-        direction  = "BUY" if score > 0 else "SELL"
-        abs_score  = abs(score)
-        if abs_score >= 60:
+        
+        # 5. RSI score (+/- 20)
+        rsi_score, current_rsi = get_rsi_signal(m5["rsi"])
+        score += rsi_score
+        
+        # 6. MACD (+/- 20)
+        macd_score = get_macd_score(m5)
+        score += macd_score
+        
+        # 7. Round number check (+/- 15)
+        rn_result, rn_level = check_round_numbers(
+            current_close, current_atr, pair
+        )
+        # We apply round number score AFTER direction decision
+        
+        # ── DIRECTION DECISION ────────────────────────
+        # H4 bias overrides if strong enough
+        direction = "BUY" if score > 0 else "SELL"
+        
+        # Apply round number scoring based on direction
+        if direction == "BUY":
+            if rn_result == "NEAR_SUPPORT":
+                score += 15   # Support below = good for buy
+            elif rn_result == "NEAR_RESISTANCE":
+                score -= 15   # Resistance above = bad for buy
+        else:
+            if rn_result == "NEAR_RESISTANCE":
+                score += 15   # Resistance above = good for sell
+            elif rn_result == "NEAR_SUPPORT":
+                score -= 15   # Support below = bad for sell
+        
+        # Recalculate direction after round numbers
+        direction = "BUY" if score > 0 else "SELL"
+        
+        abs_score = abs(score)
+        if abs_score >= 70:
             strength = "STRONG"
-        elif abs_score >= 30:
+        elif abs_score >= 40:
             strength = "MODERATE"
         else:
             strength = "WEAK"
-
-        h1_trend    = "BULLISH" if h1_ema21 > h1_ema50 else "BEARISH"
-        macd_signal = "BULLISH" if macd_val > macd_sig else "BEARISH"
-
-        # ── SL and TP Calculation ─────────────────────
-        sl_distance = min(current_atr * 1.5, current_atr * 2.0)
-
+        
+        h1_trend    = "BULLISH" if h1_ema21_val > h1_ema50_val else "BEARISH"
+        macd_label  = "BULLISH" if float(latest["macd"]) > float(latest["macd_signal"]) else "BEARISH"
+        
+        # ── SL AND TP ─────────────────────────────────
+        sl_distance = current_atr * 1.5
+        
         if direction == "BUY":
-            raw_sl = current_close - sl_distance
-            sl     = min(raw_sl, swing_low)
-            sl     = max(sl, current_close - current_atr * 2.0)
-            tp     = current_close + (current_close - sl) * 1.5
+            sl = min(current_close - sl_distance, swing_low)
+            sl = max(sl, current_close - current_atr * 2.0)
+            tp = current_close + (current_close - sl) * 1.5
         else:
-            raw_sl = current_close + sl_distance
-            sl     = max(raw_sl, swing_high)
-            sl     = min(sl, current_close + current_atr * 2.0)
-            tp     = current_close - (sl - current_close) * 1.5
-
-        # ── Pip Calculation ───────────────────────────
-        if any(x in pair for x in ["JPY"]):
-            pip_size = 0.01
-        elif "XAU" in pair:
-            pip_size = 0.1
-        else:
-            pip_size = 0.0001
-
-        sl_pips = abs(current_close - sl) / pip_size
-        tp_pips = abs(current_close - tp) / pip_size
-
-        # ── Rounding ──────────────────────────────────
+            sl = max(current_close + sl_distance, swing_high)
+            sl = min(sl, current_close + current_atr * 2.0)
+            tp = current_close - (sl - current_close) * 1.5
+        
+        # ── PIP CALCULATION ───────────────────────────
         if "JPY" in pair:
+            pip_size = 0.01
             decimals = 3
         elif "XAU" in pair:
+            pip_size = 0.1
             decimals = 2
         else:
+            pip_size = 0.0001
             decimals = 5
-
-        entry_fmt = round(current_close, decimals)
-        sl_fmt    = round(sl, decimals)
-        tp_fmt    = round(tp, decimals)
-
+        
+        sl_pips = abs(current_close - sl) / pip_size
+        tp_pips = abs(current_close - tp) / pip_size
+        
+        # Add round number info to signal if relevant
+        rn_note = ""
+        if rn_level and rn_result != "NEUTRAL":
+            rn_note = (
+                f"🔢 Round Level: {round(rn_level, decimals)} "
+                f"({'Support' if rn_result == 'NEAR_SUPPORT' else 'Resistance'})\n"
+            )
+        
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-        result = {
-            "pair":         pair,
-            "direction":    direction,
-            "strength":     strength,
-            "score":        abs_score,
-            "entry":        entry_fmt,
-            "stop_loss":    sl_fmt,
-            "take_profit":  tp_fmt,
-            "sl_pips":      round(sl_pips, 1),
-            "tp_pips":      round(tp_pips, 1),
-            "rr_ratio":     "1:1.5",
-            "rsi":          round(current_rsi, 1),
-            "h1_trend":     h1_trend,
-            "macd_signal":  macd_signal,
-            "atr":          round(current_atr, 5),
-            "timestamp":    timestamp,
-            "error":        False
+        
+        return {
+            "pair":        pair,
+            "direction":   direction,
+            "strength":    strength,
+            "score":       abs_score,
+            "entry":       round(current_close, decimals),
+            "stop_loss":   round(sl, decimals),
+            "take_profit": round(tp, decimals),
+            "sl_pips":     round(sl_pips, 1),
+            "tp_pips":     round(tp_pips, 1),
+            "rr_ratio":    "1:1.5",
+            "rsi":         round(current_rsi, 1),
+            "h1_trend":    h1_trend,
+            "h4_bias":     h4_bias,
+            "macd_signal": macd_label,
+            "rn_note":     rn_note,
+            "atr":         round(current_atr, 5),
+            "timestamp":   timestamp,
+            "error":       False
         }
-
-        logger.info(f"✅ Signal for {pair}: {direction} {strength} score={abs_score}")
-        return result
-
+        
     except Exception as e:
-        logger.exception(f"❌ Strategy error for {pair}: {e}")
+        logger.exception(f"Strategy error for {pair}: {e}")
         return {
             "error": True,
-            "message": f"Analysis failed for {pair}: {str(e)}"
+            "message": f"Analysis failed: {str(e)}"
         }
 
 def generate_signal_for_pair(pair: str) -> Optional[Dict]:
@@ -325,7 +458,7 @@ def generate_signal_for_pair(pair: str) -> Optional[Dict]:
         h1_data = fetch_h1_data(pair)
         m5_data = fetch_m5_data(pair)
         
-        if m5_data is None or len(m5_data) < 50:
+        if m5_data is None or len(m5_data) < 20:
             logger.error(f"Not enough M5 data for {pair}")
             return {
                 "pair": pair.replace("=X", ""),
@@ -333,7 +466,7 @@ def generate_signal_for_pair(pair: str) -> Optional[Dict]:
                 "message": f"Could not fetch market data for {pair}. Market may be closed."
             }
             
-        if h1_data is None or len(h1_data) < 50:
+        if h1_data is None or len(h1_data) < 10:
             logger.error(f"Not enough H1 data for {pair}")
             return {
                 "pair": pair.replace("=X", ""),
