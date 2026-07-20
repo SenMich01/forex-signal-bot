@@ -1,6 +1,9 @@
 import numpy as np
 import pandas as pd
 
+from datetime import datetime, timezone
+
+
 def calculate_ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
 
@@ -148,3 +151,36 @@ def get_signal(df: pd.DataFrame, df_htf: pd.DataFrame = None, min_strength: str 
         "rsi": round(curr['rsi'], 2),
         "atr": round(curr['atr'], 5)
     }
+
+
+
+def is_market_open(symbol: str = "EURUSD") -> bool:
+    """
+    Checks if the Forex or Crypto market is currently open.
+    Forex markets are open Sunday 22:00 UTC to Friday 22:00 UTC.
+    Crypto pairs (e.g. BTCUSD) are open 24/7.
+    """
+    symbol_upper = symbol.upper()
+    
+    # Crypto trades 24/7
+    if any(crypto in symbol_upper for crypto in ["BTC", "ETH", "XRP", "SOL"]):
+        return True
+
+    # Forex / Metals schedule (UTC)
+    now_utc = datetime.now(timezone.utc)
+    weekday = now_utc.weekday()  # 0=Monday, 4=Friday, 5=Saturday, 6=Sunday
+    hour = now_utc.hour
+
+    # Closed all day Saturday
+    if weekday == 5:
+        return False
+
+    # Closed Sunday before 22:00 UTC
+    if weekday == 6 and hour < 22:
+        return False
+
+    # Closed Friday after 22:00 UTC
+    if weekday == 4 and hour >= 22:
+        return False
+
+    return True
