@@ -7,10 +7,10 @@ Contains all settings, pairs to monitor, and trading parameters.
 import os
 from datetime import datetime, time
 
-# Forex pairs to monitor (7 pairs as specified)
+# Forex pairs to monitor (Yahoo Finance suffixes)
 FOREX_PAIRS = [
     "USDJPY=X",
-    "EURUSD=X", 
+    "EURUSD=X",
     "GBPUSD=X",
     "XAUUSD=X",  # Gold
     "USDCAD=X",
@@ -18,7 +18,7 @@ FOREX_PAIRS = [
     "GBPJPY=X"
 ]
 
-# Human-readable pair names for display
+# User-facing pair names
 PAIR_NAMES = {
     "USDJPY=X": "USD/JPY",
     "EURUSD=X": "EUR/USD",
@@ -29,10 +29,10 @@ PAIR_NAMES = {
     "GBPJPY=X": "GBP/JPY"
 }
 
-# Trading session hours (UTC) - London and New York overlap
+# Trading session hours (UTC)
 TRADING_SESSIONS = [
-    {"start": time(7, 0), "end": time(16, 0)},  # London session
-    {"start": time(13, 0), "end": time(21, 0)}  # New York session
+    {"start": time(7, 0),  "end": time(16, 0)},  # London
+    {"start": time(13, 0), "end": time(21, 0)}  # New York
 ]
 
 # Indicator parameters
@@ -42,16 +42,15 @@ EMA_PERIODS = {
     "EMA50": 50
 }
 
-RSI_PERIOD = 9
+RSI_PERIOD = 14
 ATR_PERIOD = 14
 
 # Signal parameters
 ATR_MULTIPLIERS = {
-    "SL": 1.0,      # Stop Loss distance from EMA50
-    "TP": 1.3,      # Take Profit multiplier for SELL
-    "TP_BUY": 1.5,  # Take Profit multiplier for BUY
-    "ENTRY": 0.3,   # Entry proximity to EMA21
-    "ENTRY_BUY": 1.5  # Entry proximity to EMA50 for BUY
+    "SL": 1.0,        # Stop-loss distance from entry
+    "TP": 1.5,        # Take-profit for SELL trades
+    "TP_BUY": 2.0,    # Take-profit for BUY trades
+    "ENTRY": 0.5      # Pullback buffer around EMA21
 }
 
 # Risk management
@@ -66,19 +65,19 @@ DUPLICATE_SIGNAL_COOLDOWN_MINUTES = 15
 DATA_CONFIG = {
     "M5": {
         "interval": "5m",
-        "period": "1d",  # Last 1 day for M5 data
-        "candles_required": 100  # Minimum candles needed
+        "period": "5d",
+        "candles_required": 100
     },
     "H1": {
-        "interval": "1h", 
-        "period": "5d",  # Last 5 days for H1 data
-        "candles_required": 50   # Minimum candles needed
+        "interval": "1h",
+        "period": "30d",
+        "candles_required": 50
     }
 }
 
 # Bot settings
 BOT_NAME = "ForexSignalBot"
-BOT_DESCRIPTION = "Real-time Forex signal bot with M5 Scalper v3 strategy"
+BOT_DESCRIPTION = "High-probability Forex signal bot with multi-timeframe pullback strategy"
 
 # File paths
 DATA_DIR = "data"
@@ -87,15 +86,16 @@ SUBSCRIBERS_FILE = os.path.join(DATA_DIR, "subscribers.json")
 # Ensure data directory exists
 os.makedirs(DATA_DIR, exist_ok=True)
 
-def is_trading_session():
+
+def is_trading_session() -> bool:
     """Check if current UTC time is within trading sessions."""
     now = datetime.utcnow().time()
-    
     for session in TRADING_SESSIONS:
         if session["start"] <= now <= session["end"]:
             return True
     return False
 
-def get_pair_name(symbol):
+
+def get_pair_name(symbol: str) -> str:
     """Get human-readable name for a forex pair symbol."""
     return PAIR_NAMES.get(symbol, symbol.replace("=X", ""))

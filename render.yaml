@@ -7,7 +7,5 @@ services:
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: RENDER_EXTERNAL_URL
-        sync: false
-      - key: PORT
-        value: 8080
+      # RENDER_EXTERNAL_URL is auto-injected by Render for every web
+      # service — do not declare it manually, that overrides the real one.
