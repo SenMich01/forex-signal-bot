@@ -19,16 +19,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-# Render auto-injects RENDER_EXTERNAL_URL for every web service — no manual
-# setup needed there. APPLICATION_URL is kept as a manual override for other
-# hosts (or if you want to force a specific URL).
-APP_URL = (
-    os.environ.get("APPLICATION_URL")
-    or os.environ.get("RENDER_EXTERNAL_URL")
-    or ""
-).rstrip("/")
-PORT = int(os.environ.get("PORT", 8080))
+TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN")
+APP_URL = os.environ.get("APPLICATION_URL", "").rstrip("/")
+PORT    = int(os.environ.get("PORT", 8080))
 
 if not TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN not set. Exiting.")
@@ -62,7 +55,6 @@ def _format_signal(signal: dict) -> str:
         f"(+{signal['tp_pips']:.1f} pips)\n"
         f"⚖️ RR: {signal['rr_ratio']}\n\n"
         f"📉 RSI (14):  {signal['rsi']:.1f}\n"
-        f"📶 ADX:       {signal['adx']:.1f}\n"
         f"📊 HTF Trend: {signal['htf_trend']}\n"
         f"📈 MACD:      {signal['macd_signal']}\n"
         f"🧩 Confluence: {signal.get('reasons', '')}\n"
@@ -95,7 +87,6 @@ async def help_command(update, context):
         "/signalall H1        — Scan all pairs on H1\n"
         "/status              — Bot status\n"
         "/debug EURUSD        — Test data fetch\n"
-        "/webhookinfo         — Check Telegram webhook status\n"
         "/help                — This message"
     )
 
@@ -248,17 +239,6 @@ async def debug_command(update, context):
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 
-async def webhookinfo_command(update, context):
-    """Diagnostic: show Telegram's current webhook registration for this bot."""
-    info = await ptb.bot.get_webhook_info()
-    await update.message.reply_text(
-        f"🔗 Webhook URL: {info.url or '(none set!)'}\n"
-        f"📬 Pending updates: {info.pending_update_count}\n"
-        f"❌ Last error: {info.last_error_message or 'None'}\n"
-        f"🖥️ Configured APP_URL: {APP_URL or '(empty — this is the problem if URL above is blank)'}"
-    )
-
-
 async def unknown(update, context):
     await update.message.reply_text(
         "❓ Unknown command. Use /help"
@@ -272,7 +252,6 @@ ptb.add_handler(CommandHandler("signal",    signal_command))
 ptb.add_handler(CommandHandler("signalall", signalall_command))
 ptb.add_handler(CommandHandler("status",    status_command))
 ptb.add_handler(CommandHandler("debug",     debug_command))
-ptb.add_handler(CommandHandler("webhookinfo", webhookinfo_command))
 ptb.add_handler(MessageHandler(filters.COMMAND, unknown))
 
 

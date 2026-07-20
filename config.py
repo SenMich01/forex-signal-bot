@@ -44,8 +44,6 @@ EMA_PERIODS = {
 
 RSI_PERIOD = 14
 ATR_PERIOD = 14
-ADX_PERIOD = 14
-ADX_THRESHOLD = 22  # minimum ADX to consider the market "trending" enough to trade a pullback
 
 # Signal parameters
 ATR_MULTIPLIERS = {
