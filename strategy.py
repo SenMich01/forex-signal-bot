@@ -26,7 +26,7 @@ from typing import Dict, Optional
 
 from config import (
     EMA_PERIODS, RSI_PERIOD, ATR_PERIOD, ATR_MULTIPLIERS,
-    is_trading_session, get_pair_name
+    ADX_PERIOD, ADX_THRESHOLD, is_trading_session, get_pair_name
 )
 from data_fetcher import get_candles
 
@@ -82,6 +82,28 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     lc = (df["low"]  - df["close"].shift()).abs()
     tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
     df["atr"] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+
+    # ADX(14) / +DI / -DI — Wilder-style smoothing (alpha = 1/period),
+    # used as a regime filter so we only trade pullbacks in a market that's
+    # actually trending, not just one where a fast/slow EMA happen to cross.
+    up_move   = df["high"].diff()
+    down_move = -df["low"].diff()
+    plus_dm  = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    alpha = 1 / ADX_PERIOD
+    tr_smooth    = tr.ewm(alpha=alpha, adjust=False).mean()
+    plus_dm_sm   = pd.Series(plus_dm, index=df.index).ewm(alpha=alpha, adjust=False).mean()
+    minus_dm_sm  = pd.Series(minus_dm, index=df.index).ewm(alpha=alpha, adjust=False).mean()
+
+    plus_di  = 100 * (plus_dm_sm  / tr_smooth.replace(0, 0.0001))
+    minus_di = 100 * (minus_dm_sm / tr_smooth.replace(0, 0.0001))
+    di_sum   = (plus_di + minus_di).replace(0, 0.0001)
+    dx       = 100 * (plus_di - minus_di).abs() / di_sum
+
+    df["plus_di"]  = plus_di
+    df["minus_di"] = minus_di
+    df["adx"]      = dx.ewm(alpha=alpha, adjust=False).mean()
 
     # Candle body / range
     df["body"]     = (df["close"] - df["open"]).abs()
@@ -159,7 +181,7 @@ def get_signal(pair: str, timeframe: str = "M5") -> Dict:
         sig = add_indicators(sig)
 
         # Drop incomplete rows
-        sig = sig.dropna(subset=["close", "high", "low", "open", "atr", "rsi"])
+        sig = sig.dropna(subset=["close", "high", "low", "open", "atr", "rsi", "adx"])
         htf = htf.dropna(subset=["close", "ema21", "ema50"])
         if len(sig) < 10 or len(htf) < 10:
             return {"error": True, "message": f"Insufficient clean data for {pair}."}
@@ -179,6 +201,7 @@ def get_signal(pair: str, timeframe: str = "M5") -> Dict:
         rsi   = float(s_last["rsi"])
         rsi_prev = float(s_prev["rsi"])
         rsi_prev2 = float(s_prev2["rsi"])
+        adx   = float(s_last["adx"])
 
         ema8  = float(s_last["ema8"])
         ema21 = float(s_last["ema21"])
@@ -214,6 +237,16 @@ def get_signal(pair: str, timeframe: str = "M5") -> Dict:
         else:
             return {"signal": False, "message": f"{pair}: No clear HTF trend. Skip."}
 
+        # 1b. ADX regime filter — reject weak/choppy conditions outright.
+        # This is the piece that was missing before: EMA21 vs EMA50 can
+        # flip "bullish" in a market that's barely trending at all, and a
+        # pullback in that kind of chop is far more likely to just stop out.
+        if adx < ADX_THRESHOLD:
+            return {
+                "signal": False,
+                "message": f"{pair}: ADX {adx:.1f} below {ADX_THRESHOLD} — market not trending. Skip."
+            }
+
         # 2. Pullback to EMA21 / EMA50 (max +/- 25)
         pullback_buffer = atr * 0.5
         bull_pullback = (
@@ -237,8 +270,8 @@ def get_signal(pair: str, timeframe: str = "M5") -> Dict:
             return {"signal": False, "message": f"{pair}: No valid pullback to EMA21. Skip."}
 
         # 3. RSI momentum resumption (max +/- 20)
-        rsi_buy  = (35 <= rsi <= 60) and rsi > rsi_prev and rsi_prev > rsi_prev2
-        rsi_sell = (40 <= rsi <= 65) and rsi < rsi_prev and rsi_prev < rsi_prev2
+        rsi_buy  = (35 <= rsi <= 60) and rsi > rsi_prev
+        rsi_sell = (40 <= rsi <= 65) and rsi < rsi_prev
 
         if rsi_buy and htf_bull:
             score += 20
@@ -346,6 +379,7 @@ def get_signal(pair: str, timeframe: str = "M5") -> Dict:
             "tp_pips":     round(tp_pips, 1),
             "rr_ratio":    f"1:{rr:.1f}" if rr > 0 else "1:1.5",
             "rsi":         round(rsi, 1),
+            "adx":         round(adx, 1),
             "htf_trend":   htf_trend,
             "macd_signal": macd_label,
             "rn_note":     rn_note,

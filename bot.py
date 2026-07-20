@@ -62,6 +62,7 @@ def _format_signal(signal: dict) -> str:
         f"(+{signal['tp_pips']:.1f} pips)\n"
         f"⚖️ RR: {signal['rr_ratio']}\n\n"
         f"📉 RSI (14):  {signal['rsi']:.1f}\n"
+        f"📶 ADX:       {signal['adx']:.1f}\n"
         f"📊 HTF Trend: {signal['htf_trend']}\n"
         f"📈 MACD:      {signal['macd_signal']}\n"
         f"🧩 Confluence: {signal.get('reasons', '')}\n"
